@@ -2,12 +2,7 @@ name: ci
 on:
   push:
     branches:
-      - main
-      - r[0-9]+ # Trigger builds after a push to weekly branches
-    tags:
-      # The following regex matches the Mimir release tag. Tag filters not as strict due to different regex system on Github Actions.
-      - mimir-[0-9]+.[0-9]+.[0-9]+**
-  pull_request:
+      - poc-unregister-endpoint
 
 concurrency:
   # Cancel any running workflow for the same branch when new commits are pushed.
