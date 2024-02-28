@@ -3133,8 +3133,9 @@ func (i *Ingester) unsetPrepareShutdown() {
 	i.metrics.shutdownMarker.Set(0)
 }
 
-func (i *Ingester) PrepareUnregisterHandler(w http.ResponseWriter, r *http.Request) {
-
+func (i *Ingester) PrepareUnregisterHandler(_ http.ResponseWriter, _ *http.Request) {
+	level.Info(i.logger).Log("msg", "prepare unregister called")
+	i.lifecycler.SetUnregisterOnShutdown(true)
 }
 
 // ShutdownHandler triggers the following set of operations in order:

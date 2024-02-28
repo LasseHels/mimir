@@ -255,6 +255,7 @@ type Ingester interface {
 	FlushHandler(http.ResponseWriter, *http.Request)
 	ShutdownHandler(http.ResponseWriter, *http.Request)
 	PrepareShutdownHandler(http.ResponseWriter, *http.Request)
+	PrepareUnregisterHandler(http.ResponseWriter, *http.Request)
 	PushWithCleanup(context.Context, *mimirpb.WriteRequest, func()) error
 	UserRegistryHandler(http.ResponseWriter, *http.Request)
 	TenantsHandler(http.ResponseWriter, *http.Request)
@@ -272,6 +273,7 @@ func (a *API) RegisterIngester(i Ingester) {
 
 	a.RegisterRoute("/ingester/flush", http.HandlerFunc(i.FlushHandler), false, true, "GET", "POST")
 	a.RegisterRoute("/ingester/prepare-shutdown", http.HandlerFunc(i.PrepareShutdownHandler), false, true, "GET", "POST", "DELETE")
+	a.RegisterRoute("/ingester/unregister-on-shutdown", http.HandlerFunc(i.PrepareUnregisterHandler), false, false, "POST")
 	a.RegisterRoute("/ingester/shutdown", http.HandlerFunc(i.ShutdownHandler), false, true, "GET", "POST")
 	a.RegisterRoute("/ingester/tsdb_metrics", http.HandlerFunc(i.UserRegistryHandler), true, true, "GET")
 
