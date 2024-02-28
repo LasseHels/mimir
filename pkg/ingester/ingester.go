@@ -3133,6 +3133,10 @@ func (i *Ingester) unsetPrepareShutdown() {
 	i.metrics.shutdownMarker.Set(0)
 }
 
+func (i *Ingester) PrepareUnregisterHandler(w http.ResponseWriter, r *http.Request) {
+
+}
+
 // ShutdownHandler triggers the following set of operations in order:
 //   - Change the state of ring to stop accepting writes.
 //   - Flush all the chunks.
