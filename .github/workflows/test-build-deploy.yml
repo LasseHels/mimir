@@ -313,7 +313,7 @@ jobs:
           ./.github/workflows/scripts/run-integration-tests-group.sh --index ${{ matrix.test_group_id }} --total ${{ matrix.test_group_total }}
 
   deploy:
-    needs: [prepare, build, lint]
+    needs: [prepare, build]
     runs-on: ubuntu-latest
     container:
       image: ${{ needs.prepare.outputs.build_image }}
@@ -337,7 +337,7 @@ jobs:
       - name: Deploy
         run: |
           if [ -n "$DOCKER_PASSWORD" ]; then
-            printenv DOCKER_PASSWORD | skopeo login -u "$DOCKER_USERNAME" --password-stdin docker.io
+            printenv DOCKER_PASSWORD | skopeo login -u "$DOCKER_USERNAME" --password-stdin ${{ secrets.REGISTRY }}
           fi
           ./.github/workflows/scripts/push-images.sh /tmp/images ${{ secrets.REGISTRY }} $(make image-tag)
         env:
