@@ -15,7 +15,6 @@ import (
 	gklog "github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/grafana/dskit/cache"
-	"github.com/grafana/dskit/cancellation"
 	"github.com/grafana/dskit/crypto/tls"
 	config_util "github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
@@ -25,8 +24,6 @@ import (
 
 	"github.com/grafana/mimir/pkg/util"
 )
-
-var errRulerNotifierStopped = cancellation.NewErrorf("rulerNotifier stopped")
 
 type NotifierConfig struct {
 	TLSEnabled bool             `yaml:"tls_enabled" category:"advanced"`
@@ -45,24 +42,20 @@ func (cfg *NotifierConfig) RegisterFlags(f *flag.FlagSet) {
 // of both actors.
 type rulerNotifier struct {
 	notifier  *notifier.Manager
-	sdCancel  context.CancelCauseFunc
+	sdCancel  context.CancelFunc
 	sdManager *discovery.Manager
 	wg        sync.WaitGroup
 	logger    gklog.Logger
 }
 
-func newRulerNotifier(o *notifier.Options, l gklog.Logger) (*rulerNotifier, error) {
-	sdCtx, sdCancel := context.WithCancelCause(context.Background())
-	sdMetrics, err := discovery.CreateAndRegisterSDMetrics(o.Registerer)
-	if err != nil {
-		return nil, err
-	}
+func newRulerNotifier(o *notifier.Options, l gklog.Logger) *rulerNotifier {
+	sdCtx, sdCancel := context.WithCancel(context.Background())
 	return &rulerNotifier{
 		notifier:  notifier.NewManager(o, l),
 		sdCancel:  sdCancel,
-		sdManager: discovery.NewManager(sdCtx, l, o.Registerer, sdMetrics),
+		sdManager: discovery.NewManager(sdCtx, l),
 		logger:    l,
-	}, nil
+	}
 }
 
 // run starts the notifier. This function doesn't block and returns immediately.
@@ -93,14 +86,14 @@ func (rn *rulerNotifier) applyConfig(cfg *config.Config) error {
 }
 
 func (rn *rulerNotifier) stop() {
-	rn.sdCancel(errRulerNotifierStopped)
+	rn.sdCancel()
 	rn.notifier.Stop()
 	rn.wg.Wait()
 }
 
 // Builds a Prometheus config.Config from a ruler.Config with just the required
 // options to configure notifications to Alertmanager.
-func buildNotifierConfig(rulerConfig *Config, resolver cache.AddressProvider, rmi discovery.RefreshMetricsManager) (*config.Config, error) {
+func buildNotifierConfig(rulerConfig *Config, resolver cache.AddressProvider) (*config.Config, error) {
 	if rulerConfig.AlertmanagerURL == "" {
 		// no AM URLs were provided, so we can just return a default config without errors
 		return &config.Config{}, nil
@@ -117,7 +110,7 @@ func buildNotifierConfig(rulerConfig *Config, resolver cache.AddressProvider, rm
 
 		var sdConfig discovery.Config
 		if isSD {
-			sdConfig = dnsSD(rulerConfig, resolver, qType, url, rmi)
+			sdConfig = dnsSD(rulerConfig, resolver, qType, url)
 		} else {
 			sdConfig = staticTarget(url)
 		}

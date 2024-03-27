@@ -28,71 +28,14 @@ Entries should include a reference to the Pull Request that introduced the chang
 
 ## main / unreleased
 
-* [CHANGE] Do not render resource blocks for `initContainers`, `nodeSelector`, `affinity` and `tolerations` if they are empty.
-* [CHANGE] Rollout-operator: remove default CPU limit. #7125
-* [CHANGE] Ring: relaxed the hash ring heartbeat period and timeout for distributor, ingester, store-gateway and compactor: #6860
-  * `-distributor.ring.heartbeat-period` set to `1m`
-  * `-distributor.ring.heartbeat-timeout` set to `4m`
-  * `-ingester.ring.heartbeat-period` set to `2m`
-  * `-ingester.ring.heartbeat-timeout` set to `10m`
-  * `-store-gateway.sharding-ring.heartbeat-period` set to `1m`
-  * `-store-gateway.sharding-ring.heartbeat-timeout` set to `4m`
-  * `-compactor.ring.heartbeat-period` set to `1m`
-  * `-compactor.ring.heartbeat-timeout` set to `4m`
-* [CHANGE] Ruler: Set `-distributor.remote-timeout` to 10s in order to accommodate writing large rule results to the ingester. #7143
-* [CHANGE] Remove `-server.grpc.keepalive.max-connection-age` and `-server.grpc.keepalive.max-connection-age-grace` from default config. The configuration now applied directly to distributor, fixing parity with jsonnet. #7269
-* [CHANGE] Remove `-server.grpc.keepalive.max-connection-idle` from default config. The configuration now applied directly to distributor, fixing parity with jsonnet. #7298
-* [CHANGE] Distributor: termination grace period increased from 60s to 100s.
-* [FEATURE] Added experimental feature for deploying [KEDA](https://keda.sh) ScaledObjects as part of the helm chart for the components: distributor, querier, query-frontend and ruler. #7282 #7392 #7679
-  * Autoscaling can be enabled via `distributor.kedaAutoscaling`, `ruler.kedaAutoscaling`, `query_frontend.kedaAutoscaling`, and `querier.kedaAutoscaling`.
-  * Global configuration of `promtheusAddress`, `pollingInterval` and `customHeaders` can be found in `kedaAutoscaling`section.
-  * Requires metamonitoring or custom installed Prometheus compatible solution, for more details on metamonitoring see [Monitor the health of your system](https://grafana.com/docs/helm-charts/mimir-distributed/latest/run-production-environment-with-helm/monitor-system-health/). See [grafana/mimir#7367](https://github.com/grafana/mimir/issues/7367) for a migration procedure.
-* [FEATURE] Gateway: Allow to configure whether or not NGINX binds IPv6 via `gateway.nginx.config.enableIPv6`. #7421
-* [ENHANCEMENT] Add `jaegerReporterMaxQueueSize` Helm value for all components where configuring `JAEGER_REPORTER_MAX_QUEUE_SIZE` makes sense, and override the Jaeger client's default value of 100 for components expected to generate many trace spans. #7068 #7086 #7259
-* [ENHANCEMENT] Rollout-operator: upgraded to v0.13.0. #7469
-* [ENHANCEMENT] Query-frontend: configured `-shutdown-delay`, `-server.grpc.keepalive.max-connection-age` and termination grace period to reduce the likelihood of queries hitting terminated query-frontends. #7129
-* [ENHANCEMENT] Distributor: reduced `-server.grpc.keepalive.max-connection-age` from `2m` to `60s` and configured `-shutdown-delay` to `90s` in order to reduce the chances of failed gRPC write requests when distributors gracefully shutdown. #7361
-* [ENHANCEMENT] Add the possibility to create a dedicated serviceAccount for the `ruler` component by setting `ruler.serivceAcount.create` to true in the values. #7132
-* [ENHANCEMENT] nginx, Gateway: set `proxy_http_version: 1.1` to proxy to HTTP 1.1. #5040
-* [ENHANCEMENT] Gateway: make Ingress/Route host templateable. #7218
-* [ENHANCEMENT] Make the PSP template configurable via `rbac.podSecurityPolicy`. #7190
-* [ENHANCEMENT] Recording rules: add native histogram recording rules to `cortex_request_duration_seconds`. #7528
-* [ENHANCEMENT] Make the port used in ServiceMonitor for kube-state-metrics configurable. #7507
-* [ENHANCEMENT] Produce a clearer error messages when multiple X-Scope-OrgID headers are present. #7704
-* [BUGFIX] Metamonitoring: update dashboards to drop unsupported `step` parameter in targets. #7157
-* [BUGFIX] Recording rules: drop rules for metrics removed in 2.0: `cortex_memcache_request_duration_seconds` and `cortex_cache_request_duration_seconds`. #7514
-* [BUGFIX] Store-gateway: setting "resources.requests.memory" with a quantity that used power-of-ten SI suffix, caused an error. #7506
-
-## 5.2.3
-
-* [BUGFIX] admin-cache: set max connections to fix failure to start #7632
-
-## 5.2.2
-
-* [BUGFIX] Updated GEM image to v2.11.2. #7555
-
-## 5.2.1
-
-* [BUGFIX] Revert [PR 6999](https://github.com/grafana/mimir/pull/6999), introduced in 5.2.0, which broke installations relying on the default value of `blocks_storage.backend: s3`. If `mimir.structuredConfig.blocks_storage.backend: s3` wasn't explicitly set, then Mimir would fail to connect to S3 and will instead try to read and write blocks to the local filesystem. #7199
-
-## 5.2.0
-
+* [FEATURE] Added option to enable StatefulSetAutoDeletePVC for StatefulSets for compactor, ingester, store-gateway, and alertmanager via `*.persistance.enableRetentionPolicy`, `*.persistance.whenDeleted`, and `*.persistance.whenScaled`. #6106
 * [CHANGE] Remove deprecated configuration parameter `blocks_storage.bucket_store.max_chunk_pool_bytes`. #6673
 * [CHANGE] Reduce `-server.grpc-max-concurrent-streams` from 1000 to 500 for ingester and to 100 for all components. #5666
 * [CHANGE] Changed default `clusterDomain` from `cluster.local` to `cluster.local.` to reduce the number of DNS lookups made by Mimir. #6389
-* [CHANGE] Change the default timeout used for index-queries caches from `200ms` to `450ms`. #6786
-* [FEATURE] Added option to enable StatefulSetAutoDeletePVC for StatefulSets for compactor, ingester, store-gateway, and alertmanager via `*.persistance.enableRetentionPolicy`, `*.persistance.whenDeleted`, and `*.persistance.whenScaled`. #6106
-* [FEATURE] Add pure Ingress option instead of the gateway service. #6932
 * [ENHANCEMENT] Update the `rollout-operator` subchart to `0.10.0`. #6022 #6110 #6558 #6681
 * [ENHANCEMENT] Add support for not setting replicas for distributor, querier, and query-frontend. #6373
-* [ENHANCEMENT] Make Memcached connection limit configurable. #6715
-* [BUGFIX] Let the unified gateway/nginx config listen on IPv6 as well. Followup to #5948. #6204
+* [BUGFIX] Let the unified gatway/nginx config listen on IPv6 as well. Followup to #5948. #6204
 * [BUGFIX] Quote `checksum/config` when using external config. This allows setting `externalConfigVersion` to numeric values. #6407
-* [BUGFIX] Update memcached-exporter to 0.14.1 due to CVE-2023-39325. #6861
-
-## 5.1.4
-
-* [BUGFIX] Update memcached-exporter to 0.14.1 due to CVE-2023-39325.
 
 ## 5.1.3
 

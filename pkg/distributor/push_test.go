@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/failsafe-go/failsafe-go/circuitbreaker"
 	"github.com/go-kit/log"
 	"github.com/golang/snappy"
 	"github.com/grafana/dskit/flagext"
@@ -25,7 +25,6 @@ import (
 	"github.com/grafana/dskit/httpgrpc/server"
 	"github.com/grafana/dskit/middleware"
 	"github.com/grafana/dskit/user"
-	"github.com/pkg/errors"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/prompb"
 	"github.com/prometheus/prometheus/storage/remote"
@@ -36,9 +35,7 @@ import (
 	"go.opentelemetry.io/collector/pdata/pmetric/pmetricotlp"
 	"google.golang.org/grpc/codes"
 
-	"github.com/grafana/mimir/pkg/ingester/client"
 	"github.com/grafana/mimir/pkg/mimirpb"
-	"github.com/grafana/mimir/pkg/util"
 	"github.com/grafana/mimir/pkg/util/test"
 	"github.com/grafana/mimir/pkg/util/validation"
 )
@@ -137,18 +134,18 @@ func TestHandlerOTLPPush(t *testing.T) {
 		require.Len(t, series, 1)
 
 		samples := series[0].Samples
-		require.Len(t, samples, 1)
+		assert.Equal(t, 1, len(samples))
 		assert.Equal(t, float64(1), samples[0].Value)
 		assert.Equal(t, "__name__", series[0].Labels[0].Name)
 		assert.Equal(t, "foo", series[0].Labels[0].Value)
 
 		metadata := request.Metadata
-		require.Len(t, metadata, 1)
 		assert.Equal(t, mimirpb.GAUGE, metadata[0].GetType())
 		assert.Equal(t, "foo", metadata[0].GetMetricFamilyName())
 		assert.Equal(t, "metric_help", metadata[0].GetHelp())
 		assert.Equal(t, "metric_unit", metadata[0].GetUnit())
 
+		pushReq.CleanUp()
 		return nil
 	}
 
@@ -157,7 +154,7 @@ func TestHandlerOTLPPush(t *testing.T) {
 		require.NoError(t, err)
 
 		series := request.Timeseries
-		require.Len(t, series, 1)
+		assert.Len(t, series, 1)
 
 		samples := series[0].Samples
 		require.Equal(t, 1, len(samples))
@@ -168,6 +165,7 @@ func TestHandlerOTLPPush(t *testing.T) {
 		metadata := request.Metadata
 		assert.Equal(t, []*mimirpb.MetricMetadata(nil), metadata)
 
+		pushReq.CleanUp()
 		return nil
 	}
 
@@ -297,7 +295,6 @@ func TestHandlerOTLPPush(t *testing.T) {
 			require.NoError(t, err)
 			pusher := func(ctx context.Context, pushReq *Request) error {
 				t.Helper()
-				t.Cleanup(pushReq.CleanUp)
 				return tt.verifyFunc(t, pushReq)
 			}
 			handler := OTLPHandler(tt.maxMsgSize, nil, false, tt.enableOtelMetadataStorage, limits, RetryConfig{}, nil, pusher, log.NewNopLogger())
@@ -308,7 +305,7 @@ func TestHandlerOTLPPush(t *testing.T) {
 			assert.Equal(t, tt.responseCode, resp.Code)
 			if tt.errMessage != "" {
 				body, err := io.ReadAll(resp.Body)
-				require.NoError(t, err)
+				assert.NoError(t, err)
 				assert.Contains(t, string(body), tt.errMessage)
 			}
 		})
@@ -472,7 +469,7 @@ func TestHandler_otlpWriteRequestTooBigWithCompression(t *testing.T) {
 func TestHandler_mimirWriteRequest(t *testing.T) {
 	req := createRequest(t, createMimirWriteRequestProtobuf(t, false))
 	resp := httptest.NewRecorder()
-	sourceIPs, _ := middleware.NewSourceIPs("SomeField", "(.*)", false)
+	sourceIPs, _ := middleware.NewSourceIPs("SomeField", "(.*)")
 	handler := Handler(100000, sourceIPs, false, nil, RetryConfig{}, verifyWritePushFunc(t, mimirpb.RULE), log.NewNopLogger())
 	handler.ServeHTTP(resp, req)
 	assert.Equal(t, 200, resp.Code)
@@ -481,7 +478,7 @@ func TestHandler_mimirWriteRequest(t *testing.T) {
 func TestHandler_contextCanceledRequest(t *testing.T) {
 	req := createRequest(t, createMimirWriteRequestProtobuf(t, false))
 	resp := httptest.NewRecorder()
-	sourceIPs, _ := middleware.NewSourceIPs("SomeField", "(.*)", false)
+	sourceIPs, _ := middleware.NewSourceIPs("SomeField", "(.*)")
 	handler := Handler(100000, sourceIPs, false, nil, RetryConfig{}, func(_ context.Context, req *Request) error {
 		defer req.CleanUp()
 		return fmt.Errorf("the request failed: %w", context.Canceled)
@@ -523,13 +520,13 @@ func TestHandler_EnsureSkipLabelNameValidationBehaviour(t *testing.T) {
 			req:                          createRequest(t, createMimirWriteRequestProtobufWithNonSupportedLabelNames(t, true)),
 			verifyReqHandler: func(ctx context.Context, pushReq *Request) error {
 				request, err := pushReq.WriteRequest()
-				require.NoError(t, err)
-				t.Cleanup(pushReq.CleanUp)
+				assert.NoError(t, err)
 				assert.Len(t, request.Timeseries, 1)
 				assert.Equal(t, "a-label", request.Timeseries[0].Labels[0].Name)
 				assert.Equal(t, "value", request.Timeseries[0].Labels[0].Value)
 				assert.Equal(t, mimirpb.RULE, request.Source)
 				assert.False(t, request.SkipLabelNameValidation)
+				pushReq.CleanUp()
 				return nil
 			},
 			includeAllowSkiplabelNameValidationHeader: true,
@@ -605,13 +602,13 @@ func verifyWritePushFunc(t *testing.T, expectSource mimirpb.WriteRequest_SourceE
 	t.Helper()
 	return func(ctx context.Context, pushReq *Request) error {
 		request, err := pushReq.WriteRequest()
-		require.NoError(t, err)
-		t.Cleanup(pushReq.CleanUp)
-		require.Len(t, request.Timeseries, 1)
-		require.Equal(t, "__name__", request.Timeseries[0].Labels[0].Name)
-		require.Equal(t, "foo", request.Timeseries[0].Labels[0].Value)
-		require.Equal(t, expectSource, request.Source)
-		require.False(t, request.SkipLabelNameValidation)
+		assert.NoError(t, err)
+		assert.Len(t, request.Timeseries, 1)
+		assert.Equal(t, "__name__", request.Timeseries[0].Labels[0].Name)
+		assert.Equal(t, "foo", request.Timeseries[0].Labels[0].Value)
+		assert.Equal(t, expectSource, request.Source)
+		assert.False(t, request.SkipLabelNameValidation)
+		pushReq.CleanUp()
 		return nil
 	}
 }
@@ -761,8 +758,8 @@ func TestHandler_ErrorTranslation(t *testing.T) {
 	}
 	for _, tc := range parserTestCases {
 		t.Run(tc.name, func(t *testing.T) {
-			parserFunc := func(context.Context, *http.Request, int, *util.RequestBuffers, *mimirpb.PreallocWriteRequest, log.Logger) error {
-				return tc.err
+			parserFunc := func(context.Context, *http.Request, int, []byte, *mimirpb.PreallocWriteRequest, log.Logger) ([]byte, error) {
+				return nil, tc.err
 			}
 			pushFunc := func(ctx context.Context, req *Request) error {
 				_, err := req.WriteRequest() // just read the body so we can trigger the parser
@@ -828,8 +825,8 @@ func TestHandler_ErrorTranslation(t *testing.T) {
 	for _, tc := range testCases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			parserFunc := func(context.Context, *http.Request, int, *util.RequestBuffers, *mimirpb.PreallocWriteRequest, log.Logger) error {
-				return nil
+			parserFunc := func(context.Context, *http.Request, int, []byte, *mimirpb.PreallocWriteRequest, log.Logger) ([]byte, error) {
+				return nil, nil
 			}
 			pushFunc := func(ctx context.Context, req *Request) error {
 				_, err := req.WriteRequest() // just read the body so we can trigger the parser
@@ -844,7 +841,7 @@ func TestHandler_ErrorTranslation(t *testing.T) {
 
 			assert.Equal(t, tc.expectedHTTPStatus, recorder.Code)
 			if tc.err != nil {
-				require.Equal(t, fmt.Sprintf("%s\n", tc.expectedErrorMessage), recorder.Body.String())
+				assert.Equal(t, fmt.Sprintf("%s\n", tc.expectedErrorMessage), recorder.Body.String())
 			}
 			header := recorder.Header().Get(server.DoNotLogErrorHeaderKey)
 			if tc.expectedDoNotLogErrorHeader {
@@ -978,11 +975,8 @@ func TestHandler_HandleRetryAfterHeader(t *testing.T) {
 }
 
 func TestHandler_ToHTTPStatus(t *testing.T) {
-	const (
-		ingesterID  = "ingester-25"
-		userID      = "user"
-		originalMsg = "this is an error"
-	)
+	const userID = "user"
+	const originalMsg = "this is an error"
 	originalErr := errors.New(originalMsg)
 	replicasNotMatchErr := newReplicasDidNotMatchError("a", "b")
 	tooManyClustersErr := newTooManyClustersError(10)
@@ -1082,79 +1076,59 @@ func TestHandler_ToHTTPStatus(t *testing.T) {
 			expectedErrorMsg:            requestRateLimitedErr.Error(),
 		},
 		"an ingesterPushError with BAD_DATA cause gets translated into an HTTP 400": {
-			err:                newIngesterPushError(createStatusWithDetails(t, codes.Internal, originalMsg, mimirpb.BAD_DATA), ingesterID),
+			err:                newIngesterPushError(createStatusWithDetails(t, codes.Internal, originalMsg, mimirpb.BAD_DATA)),
 			expectedHTTPStatus: http.StatusBadRequest,
-			expectedErrorMsg:   fmt.Sprintf("%s %s: %s", failedPushingToIngesterMessage, ingesterID, originalMsg),
+			expectedErrorMsg:   fmt.Sprintf("%s: %s", failedPushingToIngesterMessage, originalMsg),
 		},
 		"a DoNotLogError of an ingesterPushError with BAD_DATA cause gets translated into an HTTP 400": {
-			err:                middleware.DoNotLogError{Err: newIngesterPushError(createStatusWithDetails(t, codes.FailedPrecondition, originalMsg, mimirpb.BAD_DATA), ingesterID)},
+			err:                middleware.DoNotLogError{Err: newIngesterPushError(createStatusWithDetails(t, codes.FailedPrecondition, originalMsg, mimirpb.BAD_DATA))},
 			expectedHTTPStatus: http.StatusBadRequest,
-			expectedErrorMsg:   fmt.Sprintf("%s %s: %s", failedPushingToIngesterMessage, ingesterID, originalMsg),
-		},
-		"an ingesterPushError with METHOD_NOT_ALLOWED cause gets translated into an HTTP 501": {
-			err:                newIngesterPushError(createStatusWithDetails(t, codes.Unimplemented, originalMsg, mimirpb.METHOD_NOT_ALLOWED), ingesterID),
-			expectedHTTPStatus: http.StatusNotImplemented,
-			expectedErrorMsg:   fmt.Sprintf("%s %s: %s", failedPushingToIngesterMessage, ingesterID, originalMsg),
-		},
-		"a DoNotLogError of an ingesterPushError with METHOD_NOT_ALLOWED cause gets translated into an HTTP 501": {
-			err:                middleware.DoNotLogError{Err: newIngesterPushError(createStatusWithDetails(t, codes.Unimplemented, originalMsg, mimirpb.METHOD_NOT_ALLOWED), ingesterID)},
-			expectedHTTPStatus: http.StatusNotImplemented,
-			expectedErrorMsg:   fmt.Sprintf("%s %s: %s", failedPushingToIngesterMessage, ingesterID, originalMsg),
+			expectedErrorMsg:   fmt.Sprintf("%s: %s", failedPushingToIngesterMessage, originalMsg),
 		},
 		"an ingesterPushError with TSDB_UNAVAILABLE cause gets translated into an HTTP 503": {
-			err:                newIngesterPushError(createStatusWithDetails(t, codes.Internal, originalMsg, mimirpb.TSDB_UNAVAILABLE), ingesterID),
+			err:                newIngesterPushError(createStatusWithDetails(t, codes.Internal, originalMsg, mimirpb.TSDB_UNAVAILABLE)),
 			expectedHTTPStatus: http.StatusServiceUnavailable,
-			expectedErrorMsg:   fmt.Sprintf("%s %s: %s", failedPushingToIngesterMessage, ingesterID, originalMsg),
+			expectedErrorMsg:   fmt.Sprintf("%s: %s", failedPushingToIngesterMessage, originalMsg),
 		},
 		"a DoNotLogError of an ingesterPushError with TSDB_UNAVAILABLE cause gets translated into an HTTP 503": {
-			err:                middleware.DoNotLogError{Err: newIngesterPushError(createStatusWithDetails(t, codes.Internal, originalMsg, mimirpb.TSDB_UNAVAILABLE), ingesterID)},
+			err:                middleware.DoNotLogError{Err: newIngesterPushError(createStatusWithDetails(t, codes.Internal, originalMsg, mimirpb.TSDB_UNAVAILABLE))},
 			expectedHTTPStatus: http.StatusServiceUnavailable,
-			expectedErrorMsg:   fmt.Sprintf("%s %s: %s", failedPushingToIngesterMessage, ingesterID, originalMsg),
+			expectedErrorMsg:   fmt.Sprintf("%s: %s", failedPushingToIngesterMessage, originalMsg),
 		},
 		"an ingesterPushError with SERVICE_UNAVAILABLE cause gets translated into an HTTP 500": {
-			err:                newIngesterPushError(createStatusWithDetails(t, codes.Unavailable, originalMsg, mimirpb.SERVICE_UNAVAILABLE), ingesterID),
+			err:                newIngesterPushError(createStatusWithDetails(t, codes.Unavailable, originalMsg, mimirpb.SERVICE_UNAVAILABLE)),
 			expectedHTTPStatus: http.StatusInternalServerError,
-			expectedErrorMsg:   fmt.Sprintf("%s %s: %s", failedPushingToIngesterMessage, ingesterID, originalMsg),
+			expectedErrorMsg:   fmt.Sprintf("%s: %s", failedPushingToIngesterMessage, originalMsg),
 		},
 		"a DoNotLogError of an ingesterPushError with SERVICE_UNAVAILABLE cause gets translated into an HTTP 500": {
-			err:                middleware.DoNotLogError{Err: newIngesterPushError(createStatusWithDetails(t, codes.Unavailable, originalMsg, mimirpb.SERVICE_UNAVAILABLE), ingesterID)},
+			err:                middleware.DoNotLogError{Err: newIngesterPushError(createStatusWithDetails(t, codes.Unavailable, originalMsg, mimirpb.SERVICE_UNAVAILABLE))},
 			expectedHTTPStatus: http.StatusInternalServerError,
-			expectedErrorMsg:   fmt.Sprintf("%s %s: %s", failedPushingToIngesterMessage, ingesterID, originalMsg),
+			expectedErrorMsg:   fmt.Sprintf("%s: %s", failedPushingToIngesterMessage, originalMsg),
 		},
 		"an ingesterPushError with INSTANCE_LIMIT cause gets translated into an HTTP 500": {
-			err:                newIngesterPushError(createStatusWithDetails(t, codes.Unavailable, originalMsg, mimirpb.INSTANCE_LIMIT), ingesterID),
+			err:                newIngesterPushError(createStatusWithDetails(t, codes.Unavailable, originalMsg, mimirpb.INSTANCE_LIMIT)),
 			expectedHTTPStatus: http.StatusInternalServerError,
-			expectedErrorMsg:   fmt.Sprintf("%s %s: %s", failedPushingToIngesterMessage, ingesterID, originalMsg),
+			expectedErrorMsg:   fmt.Sprintf("%s: %s", failedPushingToIngesterMessage, originalMsg),
 		},
 		"a DoNotLogError of an ingesterPushError with INSTANCE_LIMIT cause gets translated into an HTTP 500": {
-			err:                middleware.DoNotLogError{Err: newIngesterPushError(createStatusWithDetails(t, codes.Unavailable, originalMsg, mimirpb.INSTANCE_LIMIT), ingesterID)},
+			err:                middleware.DoNotLogError{Err: newIngesterPushError(createStatusWithDetails(t, codes.Unavailable, originalMsg, mimirpb.INSTANCE_LIMIT))},
 			expectedHTTPStatus: http.StatusInternalServerError,
-			expectedErrorMsg:   fmt.Sprintf("%s %s: %s", failedPushingToIngesterMessage, ingesterID, originalMsg),
+			expectedErrorMsg:   fmt.Sprintf("%s: %s", failedPushingToIngesterMessage, originalMsg),
 		},
 		"an ingesterPushError with UNKNOWN_CAUSE cause gets translated into an HTTP 500": {
-			err:                newIngesterPushError(createStatusWithDetails(t, codes.Internal, originalMsg, mimirpb.UNKNOWN_CAUSE), ingesterID),
+			err:                newIngesterPushError(createStatusWithDetails(t, codes.Internal, originalMsg, mimirpb.UNKNOWN_CAUSE)),
 			expectedHTTPStatus: http.StatusInternalServerError,
-			expectedErrorMsg:   fmt.Sprintf("%s %s: %s", failedPushingToIngesterMessage, ingesterID, originalMsg),
+			expectedErrorMsg:   fmt.Sprintf("%s: %s", failedPushingToIngesterMessage, originalMsg),
 		},
 		"a DoNotLogError of an ingesterPushError with UNKNOWN_CAUSE cause gets translated into an HTTP 500": {
-			err:                middleware.DoNotLogError{Err: newIngesterPushError(createStatusWithDetails(t, codes.Internal, originalMsg, mimirpb.UNKNOWN_CAUSE), ingesterID)},
+			err:                middleware.DoNotLogError{Err: newIngesterPushError(createStatusWithDetails(t, codes.Internal, originalMsg, mimirpb.UNKNOWN_CAUSE))},
 			expectedHTTPStatus: http.StatusInternalServerError,
-			expectedErrorMsg:   fmt.Sprintf("%s %s: %s", failedPushingToIngesterMessage, ingesterID, originalMsg),
+			expectedErrorMsg:   fmt.Sprintf("%s: %s", failedPushingToIngesterMessage, originalMsg),
 		},
 		"an ingesterPushError obtained from a DeadlineExceeded coming from the ingester gets translated into an HTTP 500": {
-			err:                newIngesterPushError(createStatusWithDetails(t, codes.Internal, context.DeadlineExceeded.Error(), mimirpb.UNKNOWN_CAUSE), ingesterID),
+			err:                newIngesterPushError(createStatusWithDetails(t, codes.Internal, context.DeadlineExceeded.Error(), mimirpb.UNKNOWN_CAUSE)),
 			expectedHTTPStatus: http.StatusInternalServerError,
-			expectedErrorMsg:   fmt.Sprintf("%s %s: %s", failedPushingToIngesterMessage, ingesterID, context.DeadlineExceeded),
-		},
-		"a circuitBreakerOpenError gets translated into an HTTP 503": {
-			err:                newCircuitBreakerOpenError(client.ErrCircuitBreakerOpen{}),
-			expectedHTTPStatus: http.StatusServiceUnavailable,
-			expectedErrorMsg:   circuitbreaker.ErrOpen.Error(),
-		},
-		"a wrapped circuitBreakerOpenError gets translated into an HTTP 503": {
-			err:                errors.Wrap(newCircuitBreakerOpenError(client.ErrCircuitBreakerOpen{}), fmt.Sprintf("%s %s", failedPushingToIngesterMessage, ingesterID)),
-			expectedHTTPStatus: http.StatusServiceUnavailable,
-			expectedErrorMsg:   fmt.Sprintf("%s %s: %s", failedPushingToIngesterMessage, ingesterID, circuitbreaker.ErrOpen),
+			expectedErrorMsg:   fmt.Sprintf("%s: %s", failedPushingToIngesterMessage, context.DeadlineExceeded),
 		},
 	}
 	for name, tc := range testCases {

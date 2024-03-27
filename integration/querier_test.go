@@ -61,7 +61,7 @@ func testQuerierWithBlocksStorageRunningInMicroservicesMode(t *testing.T, stream
 			tenantShardSize:   1,
 			indexCacheBackend: tsdb.IndexCacheBackendMemcached,
 		},
-		"shard size 1, memcached index cache, query sharding enabled": {
+		"shard size 1, ingester gRPC streaming enabled, memcached index cache, query sharding enabled": {
 			tenantShardSize:      1,
 			indexCacheBackend:    tsdb.IndexCacheBackendMemcached,
 			queryShardingEnabled: true,
@@ -77,10 +77,9 @@ func testQuerierWithBlocksStorageRunningInMicroservicesMode(t *testing.T, stream
 	// Configure the blocks storage to frequently compact TSDB head
 	// and ship blocks to the storage.
 	commonFlags := mergeFlags(BlocksStorageFlags(), BlocksStorageS3Flags(), map[string]string{
-		"-blocks-storage.tsdb.block-ranges-period":      blockRangePeriod.String(),
-		"-blocks-storage.tsdb.ship-interval":            "1s",
-		"-blocks-storage.tsdb.retention-period":         "1ms", // Retention period counts from the moment the block was uploaded to storage so we're setting it deliberatelly small so block gets deleted as soon as possible
-		"-compactor.first-level-compaction-wait-period": "1m",  // Do not compact aggressively
+		"-blocks-storage.tsdb.block-ranges-period": blockRangePeriod.String(),
+		"-blocks-storage.tsdb.ship-interval":       "1s",
+		"-blocks-storage.tsdb.retention-period":    "1ms", // Retention period counts from the moment the block was uploaded to storage so we're setting it deliberatelly small so block gets deleted as soon as possible
 	})
 
 	// Start dependencies in common with all test cases.
@@ -158,6 +157,7 @@ func testQuerierWithBlocksStorageRunningInMicroservicesMode(t *testing.T, stream
 				"-store-gateway.tenant-shard-size":                             fmt.Sprintf("%d", testCfg.tenantShardSize),
 				"-query-frontend.query-stats-enabled":                          "true",
 				"-query-frontend.parallelize-shardable-queries":                strconv.FormatBool(testCfg.queryShardingEnabled),
+				"-querier.prefer-streaming-chunks-from-ingesters":              strconv.FormatBool(streamingEnabled),
 				"-querier.prefer-streaming-chunks-from-store-gateways":         strconv.FormatBool(streamingEnabled),
 			})
 
@@ -248,7 +248,7 @@ func testQuerierWithBlocksStorageRunningInMicroservicesMode(t *testing.T, stream
 				require.NoError(t, storeGateways.WaitSumMetrics(e2e.Equals(2*2+2+3), "thanos_store_index_cache_items"))             // 2 series both for postings and series cache, 2 expanded postings on one block, 3 on another one
 				require.NoError(t, storeGateways.WaitSumMetrics(e2e.Equals(2*2+2+3), "thanos_store_index_cache_items_added_total")) // 2 series both for postings and series cache, 2 expanded postings on one block, 3 on another one
 			} else if testCfg.indexCacheBackend == tsdb.IndexCacheBackendMemcached {
-				require.NoError(t, storeGateways.WaitSumMetrics(comparingFunction(9*2), "thanos_cache_operations_total")) // one set for each get
+				require.NoError(t, storeGateways.WaitSumMetrics(comparingFunction(9*2), "thanos_memcached_operations_total")) // one set for each get
 			}
 
 			// Query back again the 1st series from storage. This time it should use the index cache.
@@ -265,7 +265,7 @@ func testQuerierWithBlocksStorageRunningInMicroservicesMode(t *testing.T, stream
 				require.NoError(t, storeGateways.WaitSumMetrics(e2e.Equals(2*2+2+3), "thanos_store_index_cache_items"))             // as before
 				require.NoError(t, storeGateways.WaitSumMetrics(e2e.Equals(2*2+2+3), "thanos_store_index_cache_items_added_total")) // as before
 			} else if testCfg.indexCacheBackend == tsdb.IndexCacheBackendMemcached {
-				require.NoError(t, storeGateways.WaitSumMetrics(comparingFunction(9*2+2), "thanos_cache_operations_total")) // as before + 2 gets (expanded postings and series)
+				require.NoError(t, storeGateways.WaitSumMetrics(comparingFunction(9*2+2), "thanos_memcached_operations_total")) // as before + 2 gets (expanded postings and series)
 			}
 
 			// Query range. We expect 1 data point with a value of 3 (number of series).
@@ -484,7 +484,7 @@ func TestQuerierWithBlocksStorageRunningInSingleBinaryMode(t *testing.T) {
 				require.NoError(t, cluster.WaitSumMetrics(e2e.Equals(float64((2*2+2+3)*seriesReplicationFactor)), "thanos_store_index_cache_items"))             // 2 series both for postings and series cache, 2 expanded postings on one block, 3 on another one
 				require.NoError(t, cluster.WaitSumMetrics(e2e.Equals(float64((2*2+2+3)*seriesReplicationFactor)), "thanos_store_index_cache_items_added_total")) // 2 series both for postings and series cache, 2 expanded postings on one block, 3 on another one
 			} else if testCfg.indexCacheBackend == tsdb.IndexCacheBackendMemcached {
-				require.NoError(t, cluster.WaitSumMetrics(e2e.Equals(float64(expectedMemcachedOps)), "thanos_cache_operations_total"))
+				require.NoError(t, cluster.WaitSumMetrics(e2e.Equals(float64(expectedMemcachedOps)), "thanos_memcached_operations_total"))
 			}
 
 			// Query back again the 1st series from storage. This time it should use the index cache.
@@ -505,7 +505,7 @@ func TestQuerierWithBlocksStorageRunningInSingleBinaryMode(t *testing.T) {
 				require.NoError(t, cluster.WaitSumMetrics(e2e.Equals(float64((2*2+2+3)*seriesReplicationFactor)), "thanos_store_index_cache_items"))             // as before
 				require.NoError(t, cluster.WaitSumMetrics(e2e.Equals(float64((2*2+2+3)*seriesReplicationFactor)), "thanos_store_index_cache_items_added_total")) // as before
 			} else if testCfg.indexCacheBackend == tsdb.IndexCacheBackendMemcached {
-				require.NoError(t, cluster.WaitSumMetrics(e2e.Equals(float64(expectedMemcachedOps)), "thanos_cache_operations_total"))
+				require.NoError(t, cluster.WaitSumMetrics(e2e.Equals(float64(expectedMemcachedOps)), "thanos_memcached_operations_total"))
 			}
 
 			// Query metadata.
@@ -549,6 +549,7 @@ func testMetadataQueriesWithBlocksStorage(
 		resp   []prompb.Label
 	}
 	type labelValuesTest struct {
+		label   string
 		matches []string
 		resp    []string
 	}
@@ -583,13 +584,16 @@ func testMetadataQueriesWithBlocksStorage(
 			},
 			labelValuesTests: []labelValuesTest{
 				{
-					resp: []string{firstSeriesInIngesterHeadName},
+					label: labels.MetricName,
+					resp:  []string{firstSeriesInIngesterHeadName},
 				},
 				{
+					label:   labels.MetricName,
 					resp:    []string{firstSeriesInIngesterHeadName},
 					matches: []string{firstSeriesInIngesterHeadName},
 				},
 				{
+					label:   labels.MetricName,
 					resp:    []string{},
 					matches: []string{lastSeriesInStorageName},
 				},
@@ -616,13 +620,17 @@ func testMetadataQueriesWithBlocksStorage(
 			},
 			labelValuesTests: []labelValuesTest{
 				{
-					resp: []string{lastSeriesInIngesterBlocksName},
+					label: labels.MetricName,
+					resp:  []string{lastSeriesInIngesterBlocksName},
 				},
+
 				{
+					label:   labels.MetricName,
 					resp:    []string{lastSeriesInIngesterBlocksName},
 					matches: []string{lastSeriesInIngesterBlocksName},
 				},
 				{
+					label:   labels.MetricName,
 					resp:    []string{},
 					matches: []string{firstSeriesInIngesterHeadName},
 				},
@@ -651,17 +659,21 @@ func testMetadataQueriesWithBlocksStorage(
 			},
 			labelValuesTests: []labelValuesTest{
 				{
-					resp: []string{lastSeriesInStorageName, lastSeriesInIngesterBlocksName, firstSeriesInIngesterHeadName},
+					label: labels.MetricName,
+					resp:  []string{lastSeriesInStorageName, lastSeriesInIngesterBlocksName, firstSeriesInIngesterHeadName},
 				},
 				{
+					label:   labels.MetricName,
 					resp:    []string{lastSeriesInStorageName},
 					matches: []string{lastSeriesInStorageName},
 				},
 				{
+					label:   labels.MetricName,
 					resp:    []string{lastSeriesInIngesterBlocksName},
 					matches: []string{lastSeriesInIngesterBlocksName},
 				},
 				{
+					label:   labels.MetricName,
 					resp:    []string{lastSeriesInStorageName, lastSeriesInIngesterBlocksName},
 					matches: []string{lastSeriesInStorageName, lastSeriesInIngesterBlocksName},
 				},
@@ -689,13 +701,16 @@ func testMetadataQueriesWithBlocksStorage(
 			},
 			labelValuesTests: []labelValuesTest{
 				{
-					resp: []string{lastSeriesInStorageName},
+					label: labels.MetricName,
+					resp:  []string{lastSeriesInStorageName},
 				},
 				{
+					label:   labels.MetricName,
 					resp:    []string{lastSeriesInStorageName},
 					matches: []string{lastSeriesInStorageName},
 				},
 				{
+					label:   labels.MetricName,
 					resp:    []string{},
 					matches: []string{firstSeriesInIngesterHeadName},
 				},
@@ -710,21 +725,21 @@ func testMetadataQueriesWithBlocksStorage(
 				seriesRes, err := c.Series([]string{st.lookup}, tc.from, tc.to)
 				require.NoError(t, err)
 				if st.ok {
-					require.Equal(t, 1, len(seriesRes), st)
-					require.Equal(t, model.LabelSet(prompbLabelsToModelMetric(st.resp)), seriesRes[0], st)
+					require.Equal(t, 1, len(seriesRes))
+					require.Equal(t, model.LabelSet(prompbLabelsToModelMetric(st.resp)), seriesRes[0])
 				} else {
-					require.Equal(t, 0, len(seriesRes), st)
+					require.Equal(t, 0, len(seriesRes))
 				}
 			}
 
 			for _, lvt := range tc.labelValuesTests {
-				labelsRes, err := c.LabelValues(labels.MetricName, tc.from, tc.to, lvt.matches)
+				labelsRes, err := c.LabelValues(lvt.label, tc.from, tc.to, lvt.matches)
 				require.NoError(t, err)
 				exp := model.LabelValues{}
 				for _, val := range lvt.resp {
 					exp = append(exp, model.LabelValue(val))
 				}
-				require.Equal(t, exp, labelsRes, lvt)
+				require.Equal(t, exp, labelsRes)
 			}
 
 			labelNames, err := c.LabelNames(tc.from, tc.to)
@@ -789,10 +804,6 @@ func TestQuerierWithBlocksStorageOnMissingBlocksFromStorage(t *testing.T) {
 	require.NoError(t, ingester.WaitSumMetrics(e2e.Equals(1), "cortex_ingester_memory_series_removed_total"))
 	require.NoError(t, ingester.WaitSumMetrics(e2e.Equals(1), "cortex_ingester_memory_series"))
 
-	// Start the compactor to have the bucket index created before querying.
-	compactor := e2emimir.NewCompactor("compactor", consul.NetworkHTTPEndpoint(), flags)
-	require.NoError(t, s.StartAndWaitReady(compactor))
-
 	// Start the querier and store-gateway, and configure them to frequently sync blocks fast enough to trigger consistency check
 	// We will induce an error in the store gateway by deleting blocks and the querier ignores the direct error
 	// and relies on checking that all blocks were queried. However this consistency check will skip most recent
@@ -809,6 +820,10 @@ func TestQuerierWithBlocksStorageOnMissingBlocksFromStorage(t *testing.T) {
 	// Wait until the querier and store-gateway have updated the ring
 	require.NoError(t, querier.WaitSumMetrics(e2e.Equals(512*2), "cortex_ring_tokens_total"))
 	require.NoError(t, storeGateway.WaitSumMetrics(e2e.Equals(512), "cortex_ring_tokens_total"))
+
+	// Start the compactor to have the bucket index created before querying.
+	compactor := e2emimir.NewCompactor("compactor", consul.NetworkHTTPEndpoint(), flags)
+	require.NoError(t, s.StartAndWaitReady(compactor))
 
 	// Wait until the blocks are old enough for consistency check
 	// 1 sync on startup, 3 to go over the consistency check limit explained above
@@ -851,7 +866,7 @@ func TestQueryLimitsWithBlocksStorageRunningInMicroServices(t *testing.T) {
 	const blockRangePeriod = 5 * time.Second
 
 	for _, streamingEnabled := range []bool{true, false} {
-		t.Run(fmt.Sprintf("store-gateway streaming enabled: %v", streamingEnabled), func(t *testing.T) {
+		t.Run(fmt.Sprintf("streaming enabled: %v", streamingEnabled), func(t *testing.T) {
 			s, err := e2e.NewScenario(networkName)
 			require.NoError(t, err)
 			defer s.Close()
@@ -864,6 +879,7 @@ func TestQueryLimitsWithBlocksStorageRunningInMicroServices(t *testing.T) {
 				"-blocks-storage.bucket-store.sync-interval":           "1s",
 				"-blocks-storage.tsdb.retention-period":                ((blockRangePeriod * 2) - 1).String(),
 				"-querier.max-fetched-series-per-query":                "3",
+				"-querier.prefer-streaming-chunks-from-ingesters":      strconv.FormatBool(streamingEnabled),
 				"-querier.prefer-streaming-chunks-from-store-gateways": strconv.FormatBool(streamingEnabled),
 			})
 

@@ -35,6 +35,11 @@ func (i *ActivityTrackerWrapper) Push(ctx context.Context, request *mimirpb.Writ
 	return i.ing.Push(ctx, request)
 }
 
+func (i *ActivityTrackerWrapper) PushWithCleanup(ctx context.Context, r *mimirpb.WriteRequest, cleanUp func()) error {
+	// No tracking in PushWithCleanup
+	return i.ing.PushWithCleanup(ctx, r, cleanUp)
+}
+
 func (i *ActivityTrackerWrapper) QueryStream(request *client.QueryRequest, server client.Ingester_QueryStreamServer) error {
 	ix := i.tracker.Insert(func() string {
 		return requestActivity(server.Context(), "Ingester/QueryStream", request)
@@ -152,13 +157,13 @@ func (i *ActivityTrackerWrapper) PrepareShutdownHandler(w http.ResponseWriter, r
 	i.ing.PrepareShutdownHandler(w, r)
 }
 
-func (i *ActivityTrackerWrapper) PreparePartitionDownscaleHandler(w http.ResponseWriter, r *http.Request) {
+func (i *ActivityTrackerWrapper) PrepareUnregisterHandler(w http.ResponseWriter, r *http.Request) {
 	ix := i.tracker.Insert(func() string {
-		return requestActivity(r.Context(), "Ingester/PreparePartitionDownscaleHandler", nil)
+		return requestActivity(r.Context(), "Ingester/PrepareUnregisterHandler", nil)
 	})
 	defer i.tracker.Delete(ix)
 
-	i.ing.PreparePartitionDownscaleHandler(w, r)
+	i.ing.PrepareUnregisterHandler(w, r)
 }
 
 func (i *ActivityTrackerWrapper) ShutdownHandler(w http.ResponseWriter, r *http.Request) {

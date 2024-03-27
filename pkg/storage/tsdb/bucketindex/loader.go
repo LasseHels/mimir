@@ -108,13 +108,9 @@ func (l *Loader) GetIndex(ctx context.Context, userID string) (*Index, error) {
 	l.loadAttempts.Inc()
 	idx, err := ReadIndex(ctx, l.bkt, userID, l.cfgProvider, l.logger)
 	if err != nil {
-		if !errors.Is(err, context.Canceled) {
-			// Cache the error, to avoid hammering the object store in case of persistent issues
-			// (eg. corrupted bucket index or not existing).
-			// Don't cache context.Canceled errors, as they are caused by the individual query, and we don't want to
-			// continue failing queries on them.
-			l.cacheIndex(userID, nil, err)
-		}
+		// Cache the error, to avoid hammering the object store in case of persistent issues
+		// (eg. corrupted bucket index or not existing).
+		l.cacheIndex(userID, nil, err)
 
 		if errors.Is(err, ErrIndexNotFound) {
 			level.Warn(l.logger).Log("msg", "bucket index not found", "user", userID)

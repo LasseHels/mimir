@@ -188,7 +188,6 @@ func (i *STSCertificateIdentity) Retrieve() (Value, error) {
 		AccessKeyID:     response.Result.Credentials.AccessKey,
 		SecretAccessKey: response.Result.Credentials.SecretKey,
 		SessionToken:    response.Result.Credentials.SessionToken,
-		Expiration:      response.Result.Credentials.Expiration,
 		SignerType:      SignatureDefault,
 	}, nil
 }

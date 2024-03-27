@@ -4,23 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"sort"
 	"strings"
 
 	"github.com/grafana/dskit/user"
 )
 
-const (
-	// MaxTenantIDLength is the max length of single tenant ID in bytes
-	MaxTenantIDLength = 150
-
-	tenantIDsSeparator = "|"
-)
-
 var (
-	errTenantIDTooLong = fmt.Errorf("tenant ID is too long: max %d characters", MaxTenantIDLength)
-	errUnsafeTenantID  = errors.New("tenant ID is '.' or '..'")
+	errTenantIDTooLong = errors.New("tenant ID is too long: max 150 characters")
 )
 
 type errTenantIDUnsupportedCharacter struct {
@@ -36,7 +27,9 @@ func (e *errTenantIDUnsupportedCharacter) Error() string {
 	)
 }
 
-// NormalizeTenantIDs creates a normalized form by sorting and de-duplicating the list of tenantIDs
+const tenantIDsLabelSeparator = "|"
+
+// NormalizeTenantIDs is creating a normalized form by sortiing and de-duplicating the list of tenantIDs
 func NormalizeTenantIDs(tenantIDs []string) []string {
 	sort.Strings(tenantIDs)
 
@@ -56,7 +49,7 @@ func NormalizeTenantIDs(tenantIDs []string) []string {
 	return tenantIDs[0:posOut]
 }
 
-// ValidTenantID returns an error if the single tenant ID is invalid, nil otherwise
+// ValidTenantID
 func ValidTenantID(s string) error {
 	// check if it contains invalid runes
 	for pos, r := range s {
@@ -68,49 +61,19 @@ func ValidTenantID(s string) error {
 		}
 	}
 
-	if len(s) > MaxTenantIDLength {
+	if len(s) > 150 {
 		return errTenantIDTooLong
-	}
-
-	if containsUnsafePathSegments(s) {
-		return errUnsafeTenantID
 	}
 
 	return nil
 }
 
-// JoinTenantIDs returns all tenant IDs concatenated with the separator character `|`
 func JoinTenantIDs(tenantIDs []string) string {
-	return strings.Join(tenantIDs, tenantIDsSeparator)
-}
-
-// ExtractTenantIDFromHTTPRequest extracts a single tenant ID directly from a HTTP request.
-func ExtractTenantIDFromHTTPRequest(req *http.Request) (string, context.Context, error) {
-	//lint:ignore faillint wrapper around upstream method
-	_, ctx, err := user.ExtractOrgIDFromHTTPRequest(req)
-	if err != nil {
-		return "", nil, err
-	}
-
-	tenantID, err := TenantID(ctx)
-	if err != nil {
-		return "", nil, err
-	}
-
-	return tenantID, ctx, nil
-}
-
-// TenantIDsFromOrgID extracts different tenants from an orgID string value
-//
-// ignore stutter warning
-//
-//nolint:revive
-func TenantIDsFromOrgID(orgID string) ([]string, error) {
-	return TenantIDs(user.InjectOrgID(context.TODO(), orgID))
+	return strings.Join(tenantIDs, tenantIDsLabelSeparator)
 }
 
 // this checks if a rune is supported in tenant IDs (according to
-// https://grafana.com/docs/mimir/latest/configure/about-tenant-ids/
+// https://cortexmetrics.io/docs/guides/limitations/#tenant-id-naming)
 func isSupported(c rune) bool {
 	// characters
 	if ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') {
@@ -133,8 +96,11 @@ func isSupported(c rune) bool {
 		c == ')'
 }
 
-// containsUnsafePathSegments will return true if the string is a directory
-// reference like `.` and `..`
-func containsUnsafePathSegments(id string) bool {
-	return id == "." || id == ".."
+// TenantIDsFromOrgID extracts different tenants from an orgID string value
+//
+// ignore stutter warning
+//
+//nolint:revive
+func TenantIDsFromOrgID(orgID string) ([]string, error) {
+	return TenantIDs(user.InjectOrgID(context.TODO(), orgID))
 }

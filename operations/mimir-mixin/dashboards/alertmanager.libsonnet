@@ -6,7 +6,6 @@ local filename = 'mimir-alertmanager.json';
     local jobSelector = $.jobSelector($._config.job_names.alertmanager);
     local jobInstanceSelector = jobSelector + [utils.selector.noop($._config.per_instance_label)];
     local jobIntegrationSelector = jobSelector + [utils.selector.noop('integration')];
-    assert std.md5(filename) == 'b0d38d318bbddd80476246d4930f9e55' : 'UID of the dashboard has changed, please update references to dashboard.';
     ($.dashboard('Alertmanager') + { uid: std.md5(filename) })
     .addClusterSelectorTemplates()
     .addRow(
@@ -30,18 +29,18 @@ local filename = 'mimir-alertmanager.json';
     .addRow(
       $.row('Alertmanager Distributor')
       .addPanel(
-        $.timeseriesPanel('QPS') +
+        $.panel('QPS') +
         $.qpsPanel('cortex_request_duration_seconds_count{%s, route=~"/alertmanagerpb.Alertmanager/HandleRequest"}' % $.jobMatcher($._config.job_names.alertmanager))
       )
       .addPanel(
-        $.timeseriesPanel('Latency') +
-        $.latencyRecordingRulePanel('cortex_request_duration_seconds', $.jobSelector($._config.job_names.alertmanager) + [utils.selector.re('route', '/alertmanagerpb.Alertmanager/HandleRequest')])
+        $.panel('Latency') +
+        utils.latencyRecordingRulePanel('cortex_request_duration_seconds', $.jobSelector($._config.job_names.alertmanager) + [utils.selector.re('route', '/alertmanagerpb.Alertmanager/HandleRequest')])
       )
     )
     .addRow(
       $.row('Alerts received')
       .addPanel(
-        $.timeseriesPanel('APS') +
+        $.panel('APS') +
         $.successFailurePanel(
           |||
             sum(%(prefix)s:cortex_alertmanager_alerts_received_total:rate5m%(selectors)s)
@@ -61,7 +60,7 @@ local filename = 'mimir-alertmanager.json';
     .addRow(
       $.row('Alerts grouping')
       .addPanel(
-        $.timeseriesPanel('per %s Active Aggregation Groups' % $._config.per_instance_label) +
+        $.panel('per %s Active Aggregation Groups' % $._config.per_instance_label) +
         $.queryPanel(
           'cortex_alertmanager_dispatcher_aggregation_groups{%s}' % $.jobMatcher($._config.job_names.alertmanager),
           '{{%s}}' % $._config.per_instance_label
@@ -72,14 +71,14 @@ local filename = 'mimir-alertmanager.json';
     .addRow(
       $.row('Alert notifications')
       .addPanel(
-        $.timeseriesPanel('NPS') +
+        $.panel('NPS') +
         $.successFailurePanel(
           $.queries.alertmanager.notifications.successPerSecond,
           $.queries.alertmanager.notifications.failurePerSecond,
         )
       )
       .addPanel(
-        $.timeseriesPanel('NPS by integration') +
+        $.panel('NPS by integration') +
         $.queryPanel(
           [
             |||
@@ -102,7 +101,7 @@ local filename = 'mimir-alertmanager.json';
         )
       )
       .addPanel(
-        $.timeseriesPanel('Latency') +
+        $.panel('Latency') +
         $.latencyPanel('cortex_alertmanager_notification_latency_seconds', '{%s}' % $.jobMatcher($._config.job_names.alertmanager))
       )
     )
@@ -110,11 +109,11 @@ local filename = 'mimir-alertmanager.json';
       $._config.gateway_enabled,
       $.row('Configuration API (gateway) + Alertmanager UI')
       .addPanel(
-        $.timeseriesPanel('QPS') +
+        $.panel('QPS') +
         $.qpsPanel('cortex_request_duration_seconds_count{%s, route=~"api_v1_alerts|alertmanager"}' % $.jobMatcher($._config.job_names.gateway))
       )
       .addPanel(
-        $.timeseriesPanel('Latency') +
+        $.panel('Latency') +
         utils.latencyRecordingRulePanel('cortex_request_duration_seconds', $.jobSelector($._config.job_names.gateway) + [utils.selector.re('route', 'api_v1_alerts|alertmanager')])
       )
     )
@@ -124,7 +123,7 @@ local filename = 'mimir-alertmanager.json';
     .addRow(
       $.row('Replication')
       .addPanel(
-        $.timeseriesPanel('Per %s tenants' % $._config.per_instance_label) +
+        $.panel('Per %s tenants' % $._config.per_instance_label) +
         $.queryPanel(
           'max by(%s) (cortex_alertmanager_tenants_owned{%s})' % [$._config.per_instance_label, $.jobMatcher($._config.job_names.alertmanager)],
           '{{%s}}' % $._config.per_instance_label
@@ -132,7 +131,7 @@ local filename = 'mimir-alertmanager.json';
         $.stack
       )
       .addPanel(
-        $.timeseriesPanel('Per %s alerts' % $._config.per_instance_label) +
+        $.panel('Per %s alerts' % $._config.per_instance_label) +
         $.queryPanel(
           'sum by(%s) (%s:cortex_alertmanager_alerts:sum%s)' % [$._config.per_instance_label, $.recordingRulePrefix(jobInstanceSelector), utils.toPrometheusSelector(jobInstanceSelector)],
           '{{%s}}' % $._config.per_instance_label
@@ -140,7 +139,7 @@ local filename = 'mimir-alertmanager.json';
         $.stack
       )
       .addPanel(
-        $.timeseriesPanel('Per %s silences' % $._config.per_instance_label) +
+        $.panel('Per %s silences' % $._config.per_instance_label) +
         $.queryPanel(
           'sum by(%s) (%s:cortex_alertmanager_silences:sum%s)' % [$._config.per_instance_label, $.recordingRulePrefix(jobInstanceSelector), utils.toPrometheusSelector(jobInstanceSelector)],
           '{{%s}}' % $._config.per_instance_label
@@ -151,7 +150,7 @@ local filename = 'mimir-alertmanager.json';
     .addRow(
       $.row('Tenant configuration sync')
       .addPanel(
-        $.timeseriesPanel('Syncs/sec') +
+        $.panel('Syncs/sec') +
         $.successFailurePanel(
           |||
             sum(rate(cortex_alertmanager_sync_configs_total{%s}[$__rate_interval]))
@@ -162,14 +161,14 @@ local filename = 'mimir-alertmanager.json';
         )
       )
       .addPanel(
-        $.timeseriesPanel('Syncs/sec (by reason)') +
+        $.panel('Syncs/sec (by reason)') +
         $.queryPanel(
           'sum by(reason) (rate(cortex_alertmanager_sync_configs_total{%s}[$__rate_interval]))' % $.jobMatcher($._config.job_names.alertmanager),
           '{{reason}}'
         )
       )
       .addPanel(
-        $.timeseriesPanel('Ring check errors/sec') +
+        $.panel('Ring check errors/sec') +
         $.queryPanel(
           'sum (rate(cortex_alertmanager_ring_check_errors_total{%s}[$__rate_interval]))' % $.jobMatcher($._config.job_names.alertmanager),
           'errors'
@@ -179,7 +178,7 @@ local filename = 'mimir-alertmanager.json';
     .addRow(
       $.row('Sharding initial state sync')
       .addPanel(
-        $.timeseriesPanel('Initial syncs /sec') +
+        $.panel('Initial syncs /sec') +
         $.queryPanel(
           'sum by(outcome) (rate(cortex_alertmanager_state_initial_sync_completed_total{%s}[$__rate_interval]))' % $.jobMatcher($._config.job_names.alertmanager),
           '{{outcome}}'
@@ -193,7 +192,7 @@ local filename = 'mimir-alertmanager.json';
         }
       )
       .addPanel(
-        $.timeseriesPanel('Initial sync duration') +
+        $.panel('Initial sync duration') +
         $.latencyPanel('cortex_alertmanager_state_initial_sync_duration_seconds', '{%s}' % $.jobMatcher($._config.job_names.alertmanager)) + {
           targets: [
             target {
@@ -204,7 +203,7 @@ local filename = 'mimir-alertmanager.json';
         }
       )
       .addPanel(
-        $.timeseriesPanel('Fetch state from other alertmanagers /sec') +
+        $.panel('Fetch state from other alertmanagers /sec') +
         $.successFailurePanel(
           |||
             sum(rate(cortex_alertmanager_state_fetch_replica_state_total{%s}[$__rate_interval]))
@@ -225,7 +224,7 @@ local filename = 'mimir-alertmanager.json';
     .addRow(
       $.row('Sharding runtime state sync')
       .addPanel(
-        $.timeseriesPanel('Replicate state to other alertmanagers /sec') +
+        $.panel('Replicate state to other alertmanagers /sec') +
         $.successFailurePanel(
           |||
             sum(%(prefix)s:cortex_alertmanager_state_replication_total:rate5m%(selectors)s)
@@ -242,7 +241,7 @@ local filename = 'mimir-alertmanager.json';
         )
       )
       .addPanel(
-        $.timeseriesPanel('Merge state from other alertmanagers /sec') +
+        $.panel('Merge state from other alertmanagers /sec') +
         $.successFailurePanel(
           |||
             sum(%(prefix)s:cortex_alertmanager_partial_state_merges_total:rate5m%(selectors)s)
@@ -259,7 +258,7 @@ local filename = 'mimir-alertmanager.json';
         )
       )
       .addPanel(
-        $.timeseriesPanel('Persist state to remote storage /sec') +
+        $.panel('Persist state to remote storage /sec') +
         $.successFailurePanel(
           |||
             sum(rate(cortex_alertmanager_state_persist_total{%s}[$__rate_interval]))

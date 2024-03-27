@@ -44,11 +44,11 @@ Query failure due to the querier not querying all blocks ensures the correctness
 If the query time range overlaps with the `-querier.query-ingesters-within` duration, the querier also sends the request to ingesters.
 The request to the ingesters fetches samples that have not yet been uploaded to the long-term storage or are not yet available for querying through the store-gateway.
 
-The configured period for `-querier.query-ingesters-within` should be greater than both:
+The configured period for `-querier.query-ingesters-within` should be:
 
-- `-querier.query-store-after`
-- the estimated minimum amount of time for the oldest samples stored in a block uploaded by ingester to be discovered and available for querying.
-  When running Grafana Mimir with the default configuration, the estimated minimum amount of time for the oldest sample in an uploaded block to be available for querying is `3h`.
+- greater than `-querier.query-store-after` and,
+  - greater than the estimated minimum amount of time for the oldest samples stored in a block uploaded by ingester to be discovered and available for querying.
+    When running Grafana Mimir with the default configuration, the estimated minimum amount of time for the oldest sample in an uploaded block to be available for querying is `3h`.
 
 After all samples have been fetched from both the store-gateways and the ingesters, the querier runs the PromQL engine to execute the query and sends back the result to the client.
 
@@ -82,18 +82,12 @@ Using the metadata cache reduces the number of API calls to long-term storage an
 
 To enable the metadata cache, set `-blocks-storage.bucket-store.metadata-cache.backend`.
 
-{{< admonition type="note" >}}
-Currently, Mimir supports caching with the `memcached` backend.
-
-The Memcached client includes additional configuration available via flags that begin with the prefix `-blocks-storage.bucket-store.metadata-cache.memcached.*`.
-{{< /admonition >}}
+> **Note**: Currently, only the `memcached` backend is supported. The Memcached client includes additional configuration available via flags that begin with the prefix `-blocks-storage.bucket-store.metadata-cache.memcached.*`.
 
 Additional flags for configuring the metadata cache begin with the prefix `-blocks-storage.bucket-store.metadata-cache.*`. By configuring the TTL to zero or a negative value, caching of given item type is disabled.
 
-{{< admonition type="note" >}}
-You should use the same Memcached backend cluster for both the store-gateways and queriers.
-{{< /admonition >}}
+> **Note:** The same Memcached backend cluster should be shared between store-gateways and queriers.
 
 ## Querier configuration
 
-For details about querier configuration, refer to [querier]({{< relref "../../../configure/configuration-parameters#querier" >}}).
+For details about querier configuration, refer to [querier]({{< relref "../../configuration-parameters#querier" >}}).

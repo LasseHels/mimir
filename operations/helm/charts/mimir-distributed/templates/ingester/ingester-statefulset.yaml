@@ -15,11 +15,6 @@ metadata:
 spec:
   podManagementPolicy: {{ .Values.ingester.podManagementPolicy }}
   replicas: {{ $rolloutZone.replicas }}
-  {{- if and (semverCompare ">= 1.23-0" (include "mimir.kubeVersion" .)) (.Values.ingester.persistentVolume.enableRetentionPolicy)  }}
-  persistentVolumeClaimRetentionPolicy:
-    whenDeleted: {{ .Values.ingester.persistentVolume.whenDeleted }}
-    whenScaled: {{ .Values.ingester.persistentVolume.whenScaled }}
-  {{- end }}
   selector:
     matchLabels:
       {{- include "mimir.selectorLabels" $args | nindent 6 }}
@@ -70,29 +65,21 @@ spec:
       {{- end }}
       securityContext:
         {{- include "mimir.lib.podSecurityContext" $args | nindent 8 }}
-      {{- with .Values.ingester.initContainers }}
       initContainers:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- toYaml .Values.ingester.initContainers | nindent 8 }}
       {{- if .Values.image.pullSecrets }}
       imagePullSecrets:
       {{- range .Values.image.pullSecrets }}
         - name: {{ . }}
       {{- end }}
       {{- end }}
-      {{- with $rolloutZone.nodeSelector }}
       nodeSelector:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with $rolloutZone.affinity }}
+        {{- $rolloutZone.nodeSelector | toYaml | nindent 8 }}
       affinity:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- $rolloutZone.affinity | toYaml | nindent 8 }}
       {{- include "mimir.lib.topologySpreadConstraints" (dict "ctx" . "component" "ingester") | nindent 6 }}
-      {{- with .Values.ingester.tolerations }}
       tolerations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- toYaml .Values.ingester.tolerations | nindent 8 }}
       terminationGracePeriodSeconds: {{ .Values.ingester.terminationGracePeriodSeconds }}
       volumes:
         - name: config
@@ -182,11 +169,6 @@ spec:
             {{- end }}
             {{- with .Values.ingester.env }}
               {{- toYaml . | nindent 12 }}
-            {{- end }}
-            {{- $jaeger_queue_size := dig "jaegerReporterMaxQueueSize" nil .Values.ingester }}
-            {{- if $jaeger_queue_size }}
-            - name: "JAEGER_REPORTER_MAX_QUEUE_SIZE"
-              value: {{$jaeger_queue_size | toString | toYaml }}
             {{- end }}
           envFrom:
             {{- with .Values.global.extraEnvFrom }}

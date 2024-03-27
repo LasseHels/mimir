@@ -17,8 +17,6 @@ import (
 	"bufio"
 	"crypto/tls"
 	"encoding/binary"
-	"errors"
-	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -26,6 +24,7 @@ import (
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/hashicorp/memberlist"
+	"github.com/pkg/errors"
 
 	"github.com/prometheus/alertmanager/cluster/clusterpb"
 )
@@ -100,7 +99,7 @@ func (conn *tlsConn) writePacket(fromAddr string, b []byte) error {
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("unable to marshal memeberlist packet message: %w", err)
+		return errors.Wrap(err, "unable to marshal memeberlist packet message")
 	}
 	buf := make([]byte, uint32length, uint32length+len(msg))
 	binary.LittleEndian.PutUint32(buf, uint32(len(msg)))
@@ -117,7 +116,7 @@ func (conn *tlsConn) writeStream() error {
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("unable to marshal memeberlist stream message: %w", err)
+		return errors.Wrap(err, "unable to marshal memeberlist stream message")
 	}
 	buf := make([]byte, uint32length, uint32length+len(msg))
 	binary.LittleEndian.PutUint32(buf, uint32(len(msg)))
@@ -137,7 +136,7 @@ func (conn *tlsConn) read() (*memberlist.Packet, error) {
 	lenBuf := make([]byte, uint32length)
 	_, err := io.ReadFull(reader, lenBuf)
 	if err != nil {
-		return nil, fmt.Errorf("error reading message length: %w", err)
+		return nil, errors.Wrap(err, "error reading message length")
 	}
 	msgLen := binary.LittleEndian.Uint32(lenBuf)
 	msgBuf := make([]byte, msgLen)
@@ -145,12 +144,12 @@ func (conn *tlsConn) read() (*memberlist.Packet, error) {
 	conn.mtx.Unlock()
 
 	if err != nil {
-		return nil, fmt.Errorf("error reading message: %w", err)
+		return nil, errors.Wrap(err, "error reading message")
 	}
 	pb := clusterpb.MemberlistMessage{}
 	err = proto.Unmarshal(msgBuf, &pb)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing message: %w", err)
+		return nil, errors.Wrap(err, "error parsing message")
 	}
 	if pb.Version != version {
 		return nil, errors.New("tls memberlist message version incompatible")
@@ -168,7 +167,7 @@ func (conn *tlsConn) read() (*memberlist.Packet, error) {
 func toPacket(pb clusterpb.MemberlistMessage) (*memberlist.Packet, error) {
 	addr, err := net.ResolveTCPAddr(network, pb.FromAddr)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing packet sender address: %w", err)
+		return nil, errors.Wrap(err, "error parsing packet sender address")
 	}
 	return &memberlist.Packet{
 		Buf:       pb.Msg,

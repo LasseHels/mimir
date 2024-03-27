@@ -66,10 +66,8 @@ func loadPromChunks(t testing.TB, metas []chunks.Meta, block promtsdb.BlockReade
 	defer promReader.Close()
 
 	for i := range metas {
-		chunk, iter, err := promReader.ChunkOrIterable(metas[i])
+		metas[i].Chunk, err = promReader.Chunk(metas[i])
 		require.NoError(t, err)
-		require.Nil(t, iter)
-		metas[i].Chunk = chunk
 	}
 }
 

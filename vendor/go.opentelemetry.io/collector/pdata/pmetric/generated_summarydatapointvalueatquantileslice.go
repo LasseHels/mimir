@@ -119,6 +119,7 @@ func (es SummaryDataPointValueAtQuantileSlice) RemoveIf(f func(SummaryDataPointV
 		(*es.orig)[newLen] = (*es.orig)[i]
 		newLen++
 	}
+	// TODO: Prevent memory leak by erasing truncated values.
 	*es.orig = (*es.orig)[:newLen]
 }
 

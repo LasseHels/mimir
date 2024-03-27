@@ -119,6 +119,7 @@ func (es ResourceMetricsSlice) RemoveIf(f func(ResourceMetrics) bool) {
 		(*es.orig)[newLen] = (*es.orig)[i]
 		newLen++
 	}
+	// TODO: Prevent memory leak by erasing truncated values.
 	*es.orig = (*es.orig)[:newLen]
 }
 

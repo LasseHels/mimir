@@ -32,7 +32,6 @@ import (
 	"go.uber.org/atomic"
 
 	"github.com/grafana/mimir/pkg/frontend/querymiddleware"
-	"github.com/grafana/mimir/pkg/querier/api"
 	"github.com/grafana/mimir/pkg/util/activitytracker"
 )
 
@@ -62,13 +61,12 @@ func TestWriteError(t *testing.T) {
 
 func TestHandler_ServeHTTP(t *testing.T) {
 	for _, tt := range []struct {
-		name                    string
-		cfg                     HandlerConfig
-		request                 func() *http.Request
-		expectedParams          url.Values
-		expectedMetrics         int
-		expectedActivity        string
-		expectedReadConsistency string
+		name             string
+		cfg              HandlerConfig
+		request          func() *http.Request
+		expectedParams   url.Values
+		expectedMetrics  int
+		expectedActivity string
 	}{
 		{
 			name: "handler with stats enabled, POST request with params",
@@ -87,70 +85,44 @@ func TestHandler_ServeHTTP(t *testing.T) {
 				"query": []string{"some_metric"},
 				"time":  []string{"42"},
 			},
-			expectedMetrics:         5,
-			expectedActivity:        "user:12345 UA:test-user-agent req:POST /api/v1/query query=some_metric&time=42",
-			expectedReadConsistency: "",
+			expectedMetrics:  5,
+			expectedActivity: "12345 POST /api/v1/query query=some_metric&time=42",
 		},
 		{
 			name: "handler with stats enabled, GET request with params",
 			cfg:  HandlerConfig{QueryStatsEnabled: true},
 			request: func() *http.Request {
-				r := httptest.NewRequest("GET", "/api/v1/query?query=some_metric&time=42", nil)
-				r.Header.Add("User-Agent", "test-user-agent")
-				return r
+				return httptest.NewRequest("GET", "/api/v1/query?query=some_metric&time=42", nil)
 			},
 			expectedParams: url.Values{
 				"query": []string{"some_metric"},
 				"time":  []string{"42"},
 			},
-			expectedMetrics:         5,
-			expectedActivity:        "user:12345 UA:test-user-agent req:GET /api/v1/query query=some_metric&time=42",
-			expectedReadConsistency: "",
-		},
-		{
-			name: "handler with stats enabled, GET request with params and read consistency specified",
-			cfg:  HandlerConfig{QueryStatsEnabled: true},
-			request: func() *http.Request {
-				r := httptest.NewRequest("GET", "/api/v1/query?query=some_metric&time=42", nil)
-				r.Header.Add("User-Agent", "test-user-agent")
-				return r.WithContext(api.ContextWithReadConsistency(context.Background(), api.ReadConsistencyStrong))
-			},
-			expectedParams: url.Values{
-				"query": []string{"some_metric"},
-				"time":  []string{"42"},
-			},
-			expectedMetrics:         5,
-			expectedActivity:        "user:12345 UA:test-user-agent req:GET /api/v1/query query=some_metric&time=42",
-			expectedReadConsistency: api.ReadConsistencyStrong,
+			expectedMetrics:  5,
+			expectedActivity: "12345 GET /api/v1/query query=some_metric&time=42",
 		},
 		{
 			name: "handler with stats enabled, GET request without params",
 			cfg:  HandlerConfig{QueryStatsEnabled: true},
 			request: func() *http.Request {
-				r := httptest.NewRequest("GET", "/api/v1/query", nil)
-				r.Header.Add("User-Agent", "test-user-agent")
-				return r
+				return httptest.NewRequest("GET", "/api/v1/query", nil)
 			},
-			expectedParams:          url.Values{},
-			expectedMetrics:         5,
-			expectedActivity:        "user:12345 UA:test-user-agent req:GET /api/v1/query (no params)",
-			expectedReadConsistency: "",
+			expectedParams:   url.Values{},
+			expectedMetrics:  5,
+			expectedActivity: "12345 GET /api/v1/query (no params)",
 		},
 		{
 			name: "handler with stats disabled, GET request with params",
 			cfg:  HandlerConfig{QueryStatsEnabled: false},
 			request: func() *http.Request {
-				r := httptest.NewRequest("GET", "/api/v1/query?query=some_metric&time=42", nil)
-				r.Header.Add("User-Agent", "test-user-agent")
-				return r
+				return httptest.NewRequest("GET", "/api/v1/query?query=some_metric&time=42", nil)
 			},
 			expectedParams: url.Values{
 				"query": []string{"some_metric"},
 				"time":  []string{"42"},
 			},
-			expectedMetrics:         0,
-			expectedActivity:        "user:12345 UA:test-user-agent req:GET /api/v1/query query=some_metric&time=42",
-			expectedReadConsistency: "",
+			expectedMetrics:  0,
+			expectedActivity: "12345 GET /api/v1/query query=some_metric&time=42",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -180,8 +152,7 @@ func TestHandler_ServeHTTP(t *testing.T) {
 			logger := &testLogger{}
 			handler := NewHandler(tt.cfg, roundTripper, logger, reg, at)
 
-			req := tt.request()
-			req = req.WithContext(user.InjectOrgID(req.Context(), "12345"))
+			req := tt.request().WithContext(user.InjectOrgID(context.Background(), "12345"))
 			resp := httptest.NewRecorder()
 
 			handler.ServeHTTP(resp, req)
@@ -208,6 +179,7 @@ func TestHandler_ServeHTTP(t *testing.T) {
 				require.Len(t, logger.logMessages, 1)
 
 				msg := logger.logMessages[0]
+				require.Len(t, msg, 21+len(tt.expectedParams))
 				require.Equal(t, level.InfoValue(), msg["level"])
 				require.Equal(t, "query stats", msg["msg"])
 				require.Equal(t, "query-frontend", msg["component"])
@@ -227,13 +199,6 @@ func TestHandler_ServeHTTP(t *testing.T) {
 				require.EqualValues(t, 0, msg["split_queries"])
 				require.EqualValues(t, 0, msg["estimated_series_count"])
 				require.EqualValues(t, 0, msg["queue_time_seconds"])
-
-				if tt.expectedReadConsistency != "" {
-					require.Equal(t, tt.expectedReadConsistency, msg["read_consistency"])
-				} else {
-					_, ok := msg["read_consistency"]
-					require.False(t, ok)
-				}
 			} else {
 				require.Empty(t, logger.logMessages)
 			}
@@ -245,58 +210,37 @@ func TestHandler_FailedRoundTrip(t *testing.T) {
 	for _, test := range []struct {
 		name                string
 		cfg                 HandlerConfig
-		path                string
-		queryResponseFunc   roundTripperFunc
-		expectedStatusCode  int
 		expectedMetrics     int
-		expectedStatusLog   string
+		path                string
 		expectQueryParamLog bool
+		queryErr            error
 	}{
 		{
-			name: "Failed round trip with context cancelled",
-			cfg:  HandlerConfig{QueryStatsEnabled: false},
-			path: "/api/v1/query?query=up&time=2015-07-01T20:10:51.781Z",
-			queryResponseFunc: func(*http.Request) (*http.Response, error) {
-				return nil, context.Canceled
-			},
-			expectedStatusCode:  StatusClientClosedRequest,
+			name:                "Failed round trip with context cancelled",
+			cfg:                 HandlerConfig{QueryStatsEnabled: false},
 			expectedMetrics:     0,
-			expectedStatusLog:   "canceled",
+			path:                "/api/v1/query?query=up&time=2015-07-01T20:10:51.781Z",
 			expectQueryParamLog: true,
+			queryErr:            context.Canceled,
 		},
 		{
-			name: "Failed round trip with no query params",
-			cfg:  HandlerConfig{QueryStatsEnabled: true},
-			path: "/api/v1/query",
-			queryResponseFunc: func(*http.Request) (*http.Response, error) {
-				return nil, context.Canceled
-			},
-			expectedStatusCode:  StatusClientClosedRequest,
+			name:                "Failed round trip with no query params",
+			cfg:                 HandlerConfig{QueryStatsEnabled: true},
 			expectedMetrics:     5,
-			expectedStatusLog:   "canceled",
+			path:                "/api/v1/query",
 			expectQueryParamLog: false,
-		},
-		{
-			name: "Failed round trip with HTTP response",
-			cfg:  HandlerConfig{QueryStatsEnabled: true},
-			path: "/api/v1/query",
-			queryResponseFunc: func(*http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusInternalServerError,
-					Body:       io.NopCloser(strings.NewReader("{}")),
-				}, nil
-			},
-			expectedStatusCode:  http.StatusInternalServerError,
-			expectedMetrics:     5,
-			expectedStatusLog:   "failed",
-			expectQueryParamLog: false,
+			queryErr:            context.Canceled,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			roundTripper := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				return nil, test.queryErr
+			})
+
 			reg := prometheus.NewPedanticRegistry()
 			logs := &concurrency.SyncBuffer{}
 			logger := log.NewLogfmtLogger(logs)
-			handler := NewHandler(test.cfg, test.queryResponseFunc, logger, reg, nil)
+			handler := NewHandler(test.cfg, roundTripper, logger, reg, nil)
 
 			ctx := user.InjectOrgID(context.Background(), "12345")
 			req := httptest.NewRequest("GET", test.path, nil)
@@ -304,7 +248,7 @@ func TestHandler_FailedRoundTrip(t *testing.T) {
 			resp := httptest.NewRecorder()
 
 			handler.ServeHTTP(resp, req)
-			require.Equal(t, test.expectedStatusCode, resp.Code)
+			require.Equal(t, StatusClientClosedRequest, resp.Code)
 
 			count, err := promtest.GatherAndCount(
 				reg,
@@ -314,10 +258,11 @@ func TestHandler_FailedRoundTrip(t *testing.T) {
 				"cortex_query_fetched_chunks_total",
 				"cortex_query_fetched_index_bytes_total",
 			)
+
 			require.NoError(t, err)
 
 			assert.Contains(t, strings.TrimSpace(logs.String()), "sharded_queries")
-			assert.Contains(t, strings.TrimSpace(logs.String()), fmt.Sprintf("status=%s", test.expectedStatusLog))
+			assert.Contains(t, strings.TrimSpace(logs.String()), "status=canceled")
 			if test.expectQueryParamLog {
 				assert.Contains(t, strings.TrimSpace(logs.String()), "param_query")
 			}
@@ -529,79 +474,6 @@ func TestHandler_LogsFormattedQueryDetails(t *testing.T) {
 				assert.NoError(t, err)
 				assert.InDelta(t, expectedDuration, actualDuration, float64(time.Second))
 			}
-		})
-	}
-}
-
-func TestHandler_ActiveSeriesWriteTimeout(t *testing.T) {
-	const serverWriteTimeout = 50 * time.Millisecond
-	const activeSeriesWriteTimeout = 150 * time.Millisecond
-
-	for _, tt := range []struct {
-		name            string
-		path            string
-		requestDuration time.Duration
-		wantError       bool
-		wantCtxCancel   bool
-	}{
-		{
-			name:            "deadline exceeded for non-streaming endpoint",
-			path:            "/api/v1/query",
-			requestDuration: 100 * time.Millisecond,
-			wantError:       true,
-		},
-		{
-			name:            "deadline not exceeded for active series endpoint",
-			path:            "/api/v1/cardinality/active_series",
-			requestDuration: 100 * time.Millisecond,
-		},
-		{
-			name:            "deadline exceeded for active series endpoint",
-			path:            "/api/v1/cardinality/active_series",
-			requestDuration: 200 * time.Millisecond,
-			wantError:       true,
-			wantCtxCancel:   true,
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-
-			roundTripper := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-				// Simulate a request that takes longer than the server write timeout.
-				select {
-				case <-req.Context().Done():
-					assert.EqualError(t, context.Cause(req.Context()),
-						fmt.Sprintf("context canceled: write deadline exceeded (timeout: %v)", activeSeriesWriteTimeout))
-					return nil, req.Context().Err()
-				case <-time.After(tt.requestDuration):
-					if tt.wantCtxCancel {
-						assert.Fail(t, "request context should have been cancelled")
-					}
-					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("{}"))}, nil
-				}
-			})
-
-			handler := NewHandler(
-				HandlerConfig{ActiveSeriesWriteTimeout: activeSeriesWriteTimeout},
-				roundTripper, log.NewNopLogger(), nil, nil,
-			)
-
-			server := httptest.NewUnstartedServer(handler)
-			server.Config.WriteTimeout = serverWriteTimeout
-			server.Start()
-			defer server.Close()
-
-			req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s%s", server.URL, tt.path), nil)
-			require.NoError(t, err)
-			resp, err := http.DefaultClient.Do(req)
-			if tt.wantError {
-				require.Error(t, err)
-				return
-			}
-			require.NoError(t, err)
-			defer func() {
-				_, _ = io.Copy(io.Discard, resp.Body)
-				_ = resp.Body.Close()
-			}()
 		})
 	}
 }

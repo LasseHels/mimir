@@ -10,12 +10,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
-	"reflect"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/tracing"
 )
 
 // PagingHandler contains the required data for constructing a Pager.
@@ -26,16 +23,12 @@ type PagingHandler[T any] struct {
 
 	// Fetcher fetches the first and subsequent pages.
 	Fetcher func(context.Context, *T) (T, error)
-
-	// Tracer contains the Tracer from the client that's creating the Pager.
-	Tracer tracing.Tracer
 }
 
 // Pager provides operations for iterating over paged responses.
 type Pager[T any] struct {
 	current   *T
 	handler   PagingHandler[T]
-	tracer    tracing.Tracer
 	firstPage bool
 }
 
@@ -44,7 +37,6 @@ type Pager[T any] struct {
 func NewPager[T any](handler PagingHandler[T]) *Pager[T] {
 	return &Pager[T]{
 		handler:   handler,
-		tracer:    handler.Tracer,
 		firstPage: true,
 	}
 }
@@ -59,6 +51,8 @@ func (p *Pager[T]) More() bool {
 
 // NextPage advances the pager to the next page.
 func (p *Pager[T]) NextPage(ctx context.Context) (T, error) {
+	var resp T
+	var err error
 	if p.current != nil {
 		if p.firstPage {
 			// we get here if it's an LRO-pager, we already have the first page
@@ -67,16 +61,12 @@ func (p *Pager[T]) NextPage(ctx context.Context) (T, error) {
 		} else if !p.handler.More(*p.current) {
 			return *new(T), errors.New("no more pages")
 		}
+		resp, err = p.handler.Fetcher(ctx, p.current)
 	} else {
 		// non-LRO case, first page
 		p.firstPage = false
+		resp, err = p.handler.Fetcher(ctx, nil)
 	}
-
-	var err error
-	ctx, endSpan := StartSpan(ctx, fmt.Sprintf("%s.NextPage", shortenTypeName(reflect.TypeOf(*p).Name())), p.tracer, nil)
-	defer func() { endSpan(err) }()
-
-	resp, err := p.handler.Fetcher(ctx, p.current)
 	if err != nil {
 		return *new(T), err
 	}

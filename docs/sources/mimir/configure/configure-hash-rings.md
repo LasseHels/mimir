@@ -26,7 +26,7 @@ The CLI flags used to configure the hash ring of each component have the followi
 - (Optional) Overrides-exporters: `-overrides-exporter.ring.*`
 
 The rest of the documentation refers to these prefixes as `<prefix>`.
-You can configure each parameter either via the CLI flag or its respective YAML [config option]({{< relref "./configuration-parameters" >}}).
+You can configure each parameter either via the CLI flag or its respective YAML [config option]({{< relref "../references/configuration-parameters" >}}).
 
 ## Configuring the key-value store
 
@@ -59,24 +59,16 @@ The `-memberlist.join` can be set to:
 
 The default port is `7946`.
 
-{{< admonition type="note" >}}
-At a minimum, configure one or more addresses that resolve to a consistent subset of replicas (for example, all the ingesters).
-{{< /admonition >}}
+> **Note**: At a minimum, configure one or more addresses that resolve to a consistent subset of replicas (for example, all the ingesters).
 
-{{< admonition type="note" >}}
-If you're running Grafana Mimir in Kubernetes, define a [headless Kubernetes Service](https://kubernetes.io/docs/concepts/services-networking/service/#headless-services) which resolves to the IP addresses of all Grafana Mimir Pods.
+> **Note**: If you're running Grafana Mimir in Kubernetes, define a [headless Kubernetes Service](https://kubernetes.io/docs/concepts/services-networking/service/#headless-services) which resolves to the IP addresses of all Grafana Mimir pods. Then you set `-memberlist.join` to `dnssrv+<service name>.<namespace>.svc.cluster.local:<port>`.
 
-Then set `-memberlist.join` to `dnssrv+<service name>.<namespace>.svc.cluster.local:<port>`.
-{{< /admonition >}}
-
-{{< admonition type="note" >}}
-The `memberlist` backend is configured globally, unlike other supported backends, and can't be customized on a per-component basis.
-{{< /admonition >}}
+> **Note**: The `memberlist` backend is configured globally and can't be customized on a per-component basis. Because `memberlist` is configured globally, the `memberlist` backend differs from other supported backends, such as Consul or etcd.
 
 Grafana Mimir supports TLS for memberlist connections between its components.
 For more information about TLS configuration, refer to [secure communications with TLS]({{< relref "../manage/secure/securing-communications-with-tls" >}}).
 
-To see all supported configuration parameters, refer to [memberlist]({{< relref "./configuration-parameters#memberlist" >}}).
+To see all supported configuration parameters, refer to [memberlist]({{< relref "../references/configuration-parameters#memberlist" >}}).
 
 #### Configuring the memberlist address and port
 
@@ -136,7 +128,7 @@ To use [Consul](https://www.consul.io) as a backend KV store, set the following 
 - `<prefix>.consul.hostname`: Consul hostname and port separated by colon. For example, `consul:8500`.
 - `<prefix>.consul.acl-token`: [ACL token](https://www.consul.io/docs/security/acl/acl-system) used to authenticate to Consul. If Consul authentication is disabled, you can leave the token empty.
 
-To see all supported configuration parameters, refer [consul]({{< relref "./configuration-parameters#consul" >}}).
+To see all supported configuration parameters, refer [consul]({{< relref "../references/configuration-parameters#consul" >}}).
 
 ### Etcd
 
@@ -149,7 +141,7 @@ To use [etcd](https://etcd.io) as a backend KV store, set the following paramete
 Grafana Mimir supports TLS between its components and etcd.
 For more information about TLS configuration, refer to [secure communications with TLS]({{< relref "../manage/secure/securing-communications-with-tls" >}}).
 
-To see all supported configuration parameters, refer to [etcd]({{< relref "./configuration-parameters#etcd" >}}).
+To see all supported configuration parameters, refer to [etcd]({{< relref "../references/configuration-parameters#etcd" >}}).
 
 ### Multi
 
@@ -167,10 +159,7 @@ You can use the following parameters to configure the multi KV store settings:
 - `<prefix>.multi.mirror-enabled`: Whether mirroring of writes to the secondary backend store is enabled.
 - `<prefix>.multi.mirror-timeout`: The maximum time allowed to mirror a change to the secondary backend store.
 
-{{< admonition type="note" >}}
-Grafana Mimir doesn't log an error if it's unable to mirror writes to the secondary backend store.
-However, the total number of errors is tracked through the metric `cortex_multikv_mirror_write_errors_total`.
-{{< /admonition >}}
+> **Note**: Grafana Mimir does not log an error if it is unable to mirror writes to the secondary backend store. The total number of errors is only tracked through the metric `cortex_multikv_mirror_write_errors_total`.
 
 The multi KV primary backend and mirroring can also be configured in the [runtime configuration file]({{< relref "./about-runtime-configuration" >}}).
 Changes to a multi KV Store in the runtime configuration apply to _all_ components using a multi KV store.
@@ -184,9 +173,7 @@ multi_kv_config:
   mirror_enabled: true
 ```
 
-{{< admonition type="note" >}}
-The runtime configuration settings take precedence over CLI flags.
-{{< /admonition >}}
+> **Note**: The runtime configuration settings take precedence over CLI flags.
 
 #### Ingester migration example
 

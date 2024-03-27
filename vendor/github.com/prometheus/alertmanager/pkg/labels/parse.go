@@ -14,10 +14,11 @@
 package labels
 
 import (
-	"fmt"
 	"regexp"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/pkg/errors"
 )
 
 var (
@@ -117,7 +118,7 @@ func ParseMatchers(s string) ([]*Matcher, error) {
 func ParseMatcher(s string) (_ *Matcher, err error) {
 	ms := re.FindStringSubmatch(s)
 	if len(ms) == 0 {
-		return nil, fmt.Errorf("bad matcher format: %s", s)
+		return nil, errors.Errorf("bad matcher format: %s", s)
 	}
 
 	var (
@@ -133,7 +134,7 @@ func ParseMatcher(s string) (_ *Matcher, err error) {
 	}
 
 	if !utf8.ValidString(rawValue) {
-		return nil, fmt.Errorf("matcher value not valid UTF-8: %s", ms[3])
+		return nil, errors.Errorf("matcher value not valid UTF-8: %s", ms[3])
 	}
 
 	// Unescape the rawValue:
@@ -162,7 +163,7 @@ func ParseMatcher(s string) (_ *Matcher, err error) {
 			value.WriteByte('\\')
 		case '"':
 			if !expectTrailingQuote || i < len(rawValue)-1 {
-				return nil, fmt.Errorf("matcher value contains unescaped double quote: %s", ms[3])
+				return nil, errors.Errorf("matcher value contains unescaped double quote: %s", ms[3])
 			}
 			expectTrailingQuote = false
 		default:
@@ -171,7 +172,7 @@ func ParseMatcher(s string) (_ *Matcher, err error) {
 	}
 
 	if expectTrailingQuote {
-		return nil, fmt.Errorf("matcher value contains unescaped double quote: %s", ms[3])
+		return nil, errors.Errorf("matcher value contains unescaped double quote: %s", ms[3])
 	}
 
 	return NewMatcher(typeMap[ms[2]], ms[1], value.String())

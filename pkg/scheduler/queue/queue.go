@@ -13,9 +13,7 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
-	"github.com/grafana/dskit/httpgrpc"
 	"github.com/grafana/dskit/services"
-	"github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/atomic"
@@ -33,31 +31,13 @@ var (
 	ErrQuerierShuttingDown = errors.New("querier has informed the scheduler it is shutting down")
 )
 
-type SchedulerRequest struct {
-	FrontendAddress           string
-	UserID                    string
-	QueryID                   uint64
-	Request                   *httpgrpc.HTTPRequest
-	StatsEnabled              bool
-	AdditionalQueueDimensions []string
-
-	EnqueueTime time.Time
-
-	Ctx        context.Context
-	CancelFunc context.CancelCauseFunc
-	QueueSpan  opentracing.Span
-
-	// This is only used for testing.
-	ParentSpanContext opentracing.SpanContext
-}
-
 // UserIndex is opaque type that allows to resume iteration over users between successive calls
 // of RequestQueue.GetNextRequestForQuerier method.
 type UserIndex struct {
 	last int
 }
 
-// ReuseLastUser modifies index to start iteration on the same user, for which last queue was returned.
+// Modify index to start iteration on the same user, for which last queue was returned.
 func (ui UserIndex) ReuseLastUser() UserIndex {
 	if ui.last >= 0 {
 		return UserIndex{last: ui.last - 1}
@@ -80,9 +60,8 @@ type RequestQueue struct {
 	services.Service
 	log log.Logger
 
-	maxOutstandingPerTenant          int
-	additionalQueueDimensionsEnabled bool
-	forgetDelay                      time.Duration
+	maxOutstandingPerTenant int
+	forgetDelay             time.Duration
 
 	connectedQuerierWorkers *atomic.Int32
 
@@ -123,18 +102,15 @@ type requestToEnqueue struct {
 func NewRequestQueue(
 	log log.Logger,
 	maxOutstandingPerTenant int,
-	additionalQueueDimensionsEnabled bool,
 	forgetDelay time.Duration,
 	queueLength *prometheus.GaugeVec,
 	discardedRequests *prometheus.CounterVec,
 	enqueueDuration prometheus.Histogram,
 ) *RequestQueue {
 	q := &RequestQueue{
-		log:                              log,
-		maxOutstandingPerTenant:          maxOutstandingPerTenant,
-		additionalQueueDimensionsEnabled: additionalQueueDimensionsEnabled,
-		forgetDelay:                      forgetDelay,
-
+		log:                     log,
+		maxOutstandingPerTenant: maxOutstandingPerTenant,
+		forgetDelay:             forgetDelay,
 		connectedQuerierWorkers: atomic.NewInt32(0),
 		queueLength:             queueLength,
 		discardedRequests:       discardedRequests,
@@ -163,7 +139,7 @@ func (q *RequestQueue) starting(_ context.Context) error {
 
 func (q *RequestQueue) dispatcherLoop() {
 	stopping := false
-	queueBroker := newQueueBroker(q.maxOutstandingPerTenant, q.additionalQueueDimensionsEnabled, q.forgetDelay)
+	queueBroker := newQueueBroker(q.maxOutstandingPerTenant, q.forgetDelay)
 	waitingGetNextRequestForQuerierCalls := list.New()
 
 	for {

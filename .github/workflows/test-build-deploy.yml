@@ -2,12 +2,7 @@ name: ci
 on:
   push:
     branches:
-      - main
-      - r[0-9]+ # Trigger builds after a push to weekly branches
-    tags:
-      # The following regex matches the Mimir release tag. Tag filters not as strict due to different regex system on Github Actions.
-      - mimir-[0-9]+.[0-9]+.[0-9]+**
-  pull_request:
+      - poc-unregister-endpoint
 
 concurrency:
   # Cancel any running workflow for the same branch when new commits are pushed.
@@ -27,14 +22,11 @@ jobs:
         run: echo "build_image=$(make print-build-image)" >> "$GITHUB_OUTPUT"
     outputs:
       build_image: ${{ steps.build_image_step.outputs.build_image }}
-      # Determine if we will deploy (aka push) the image to the registry.
-      is_deploy: ${{ (startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/r')) && github.event_name == 'push' && github.repository == 'grafana/mimir' }}
-      
 
   goversion:
     runs-on: ubuntu-latest
     needs: prepare
-    container: 
+    container:
       image: ${{ needs.prepare.outputs.build_image }}
     steps:
       - uses: actions/checkout@v4
@@ -103,43 +95,6 @@ jobs:
         run: make BUILD_IN_CONTAINER=false check-license
       - name: Check Docker-Compose YAML
         run: make BUILD_IN_CONTAINER=false check-mimir-microservices-mode-docker-compose-yaml check-mimir-read-write-mode-docker-compose-yaml
-
-  doc-validator:
-    runs-on: ubuntu-latest
-    container:
-      image: grafana/doc-validator:v4.1.1
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-      - name: Run Git Config
-        run: git config --global --add safe.directory '*'
-      - name: Run doc-validator tool (mimir)
-        run: >
-          doc-validator
-          '--skip-checks=^canonical-does-not-match-pretty-URL$'
-          docs/sources/mimir
-          /docs/mimir/latest
-          | reviewdog
-          -f=rdjsonl
-          --fail-on-error
-          --filter-mode=nofilter
-          --name=doc-validator
-          --reporter=github-pr-review
-        env:
-          REVIEWDOG_GITHUB_API_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
-      - name: Run doc-validator tool (helm-charts)
-        run: >
-          doc-validator
-          docs/sources/helm-charts
-          /docs/helm-charts/mimir-distributed/latest
-          | reviewdog
-          -f=rdjsonl
-          --fail-on-error
-          --filter-mode=nofilter
-          --name=doc-validator
-          --reporter=github-pr-review
-        env:
-          REVIEWDOG_GITHUB_API_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
 
   lint-jsonnet:
     runs-on: ubuntu-latest
@@ -224,16 +179,12 @@ jobs:
       - name: Cache Go build cache
         uses: actions/cache@v3
         with:
-          # Cache is shared between test groups.
-          key: test-go-build-${{ runner.os }}-${{ hashFiles('go.mod', 'go.sum') }}
+          key: test-${{ matrix.test_group_id }}-go-build-${{ runner.os }}-${{ hashFiles('go.mod', 'go.sum') }}
           path: ${{ steps.gocache.outputs.path }}
       - name: Run Tests
         run: |
           echo "Running unit tests (group ${{ matrix.test_group_id }} of ${{ matrix.test_group_total }}) with Go version: $(go version)"
           ./.github/workflows/scripts/run-unit-tests-group.sh --index ${{ matrix.test_group_id }} --total ${{ matrix.test_group_total }}
-
-  test-docs:
-    uses: ./.github/workflows/test-docs.yml
 
   build:
     runs-on: ubuntu-latest
@@ -274,34 +225,24 @@ jobs:
         run: |
           tar cvf images.tar /tmp/images
       - name: Upload Archive with Docker Images
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: Docker Images
           path: ./images.tar
       - name: Build Mimir with race-detector
         run: |
-          # When building uptodate_race target, we create two images since
-          # a Dockerfile.distroless exists. The distroless image is built with
-          # the `-distroless` suffix.
-          # We build both until we have finished migrating to distroless.
-          # We test the distroless race image in every integration test.
-          # We test the (legacy) alpine race image when deploying (aka pushing).
-          make BUILD_IN_CONTAINER=false cmd/mimir/.uptodate_race
           export IMAGE_TAG_RACE=$(make image-tag-race)
-          export MIMIR_DISTROLESS_IMAGE="grafana/mimir-distroless:$IMAGE_TAG_RACE"
-          export MIMIR_ALPINE_IMAGE="grafana/mimir:$IMAGE_TAG_RACE"
-          docker save $MIMIR_DISTROLESS_IMAGE -o ./mimir_race_image_distroless
-          docker save $MIMIR_ALPINE_IMAGE -o ./mimir_race_image_alpine
+          export MIMIR_IMAGE="grafana/mimir:$IMAGE_TAG_RACE"
+          make BUILD_IN_CONTAINER=false cmd/mimir/.uptodate_race
+          docker save $MIMIR_IMAGE -o ./mimir_race_image
       - name: Upload archive with race-enabled Mimir
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: Race-enabled Mimir
-          path: |
-            ./mimir_race_image_alpine
-            ./mimir_race_image_distroless
+          path: ./mimir_race_image
 
   integration:
-    needs: [goversion, build, prepare]
+    needs: [goversion, build]
     runs-on: ubuntu-latest
     strategy:
       # Do not abort other groups when one fails.
@@ -312,7 +253,7 @@ jobs:
         test_group_total: [6]
     steps:
       - name: Upgrade golang
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v4
         with:
           go-version: ${{ needs.goversion.outputs.version }}
           cache: false # We manage caching ourselves below to maintain consistency with the other jobs that don't use setup-go.
@@ -333,11 +274,10 @@ jobs:
       - name: Cache Go build cache
         uses: actions/cache@v3
         with:
-          # Cache is shared between test groups.
-          key: integration-go-build-${{ runner.os }}-${{ hashFiles('go.mod', 'go.sum') }}
+          key: integration-${{ matrix.test_group_id }}-go-build-${{ runner.os }}-${{ hashFiles('go.mod', 'go.sum') }}
           path: ${{ steps.gocache.outputs.path }}
       - name: Download Archive with Docker Images
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v3
         with:
           name: Docker Images
       - name: Extract Docker Images from Archive
@@ -348,86 +288,13 @@ jobs:
           # skopeo will by default load system-specific version of the image (linux/amd64).
           skopeo copy oci-archive:/tmp/images/mimirtool.oci "docker-daemon:grafana/mimirtool:$IMAGE_TAG"
       - name: Download Archive with Docker Images
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v3
         with:
           name: Race-enabled Mimir
       - name: Load race-enabled mimir into Docker
         run: |
+          docker load -i ./mimir_race_image
           export IMAGE_TAG_RACE=$(make image-tag-race)
-          docker load -i ./mimir_race_image_distroless
-          docker run "grafana/mimir-distroless:$IMAGE_TAG_RACE" --version
-      - name: Preload Images
-        # We download docker images used by integration tests so that all images are available
-        # locally and the download time doesn't account in the test execution time, which is subject
-        # to a timeout
-        run: go run ./tools/pre-pull-images | xargs -n1 -P4 docker pull
-      - name: Integration Tests
-        run: |
-          export IMAGE_TAG_RACE=$(make image-tag-race)
-          export MIMIR_IMAGE="grafana/mimir-distroless:$IMAGE_TAG_RACE"
-          export IMAGE_TAG=$(make image-tag)
-          export MIMIRTOOL_IMAGE="grafana/mimirtool:$IMAGE_TAG"
-          export MIMIR_CHECKOUT_DIR="/go/src/github.com/grafana/mimir"
-          echo "Running integration tests with image: $MIMIR_IMAGE (Mimir), $MIMIRTOOL_IMAGE (Mimirtool)"
-          echo "Running integration tests (group ${{ matrix.test_group_id }} of ${{ matrix.test_group_total }}) with Go version: $(go version)"
-          ./.github/workflows/scripts/run-integration-tests-group.sh --index ${{ matrix.test_group_id }} --total ${{ matrix.test_group_total }}
-
-  integration-alpine:
-    needs: [goversion, build, prepare]
-    runs-on: ubuntu-latest
-    if: needs.prepare.outputs.is_deploy == 'true'
-    strategy:
-      # Do not abort other groups when one fails.
-      fail-fast: false
-      # Split tests into 6 groups.
-      matrix:
-        test_group_id:    [0, 1, 2, 3, 4, 5]
-        test_group_total: [6]
-    steps:
-      - name: Upgrade golang
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ needs.goversion.outputs.version }}
-          cache: false # We manage caching ourselves below to maintain consistency with the other jobs that don't use setup-go.
-      - name: Check out repository
-        uses: actions/checkout@v4
-      - name: Run Git Config
-        run: git config --global --add safe.directory '*'
-      - name: Install Docker Client
-        run: sudo ./.github/workflows/scripts/install-docker.sh
-      - name: Symlink Expected Path to Workspace
-        run: |
-          sudo mkdir -p /go/src/github.com/grafana/mimir
-          sudo ln -s $GITHUB_WORKSPACE/* /go/src/github.com/grafana/mimir
-      - name: Get Go build cache path
-        id: gocache
-        run: |
-          echo "path=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
-      - name: Cache Go build cache
-        uses: actions/cache@v3
-        with:
-          # Cache is shared between test groups.
-          key: integration-go-build-${{ runner.os }}-${{ hashFiles('go.mod', 'go.sum') }}
-          path: ${{ steps.gocache.outputs.path }}
-      - name: Download Archive with Docker Images
-        uses: actions/download-artifact@v4
-        with:
-          name: Docker Images
-      - name: Extract Docker Images from Archive
-        run: tar xvf images.tar -C /
-      - name: Load Mimirtool Image into Docker
-        run: |
-          export IMAGE_TAG=$(make image-tag)
-          # skopeo will by default load system-specific version of the image (linux/amd64).
-          skopeo copy oci-archive:/tmp/images/mimirtool.oci "docker-daemon:grafana/mimirtool:$IMAGE_TAG"
-      - name: Download Archive with Docker Images
-        uses: actions/download-artifact@v4
-        with:
-          name: Race-enabled Mimir
-      - name: Load race-enabled mimir into Docker
-        run: |
-          export IMAGE_TAG_RACE=$(make image-tag-race)
-          docker load -i ./mimir_race_image_alpine
           docker run "grafana/mimir:$IMAGE_TAG_RACE" --version
       - name: Preload Images
         # We download docker images used by integration tests so that all images are available
@@ -446,9 +313,7 @@ jobs:
           ./.github/workflows/scripts/run-integration-tests-group.sh --index ${{ matrix.test_group_id }} --total ${{ matrix.test_group_total }}
 
   deploy:
-    needs: [prepare, build, test, lint, integration, integration-alpine]
-    # Only deploy images on pushes to the grafana/mimir repo, which either are tag pushes or weekly release branch pushes.
-    if: needs.prepare.outputs.is_deploy == 'true'
+    needs: [prepare, build]
     runs-on: ubuntu-latest
     container:
       image: ${{ needs.prepare.outputs.build_image }}
@@ -464,7 +329,7 @@ jobs:
           mkdir -p /go/src/github.com/grafana/mimir
           ln -s $GITHUB_WORKSPACE/* /go/src/github.com/grafana/mimir
       - name: Download Archive with Docker Images
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v3
         with:
           name: Docker Images
       - name: Extract Docker Images from Archive
@@ -472,9 +337,9 @@ jobs:
       - name: Deploy
         run: |
           if [ -n "$DOCKER_PASSWORD" ]; then
-            printenv DOCKER_PASSWORD | skopeo login -u "$DOCKER_USERNAME" --password-stdin docker.io
+            printenv DOCKER_PASSWORD | skopeo login -u "$DOCKER_USERNAME" --password-stdin ${{ secrets.REGISTRY }}
           fi
-          ./.github/workflows/scripts/push-images.sh /tmp/images grafana/ $(make image-tag)
+          ./.github/workflows/scripts/push-images.sh /tmp/images ${{ secrets.IMAGE_REPOSITORY }} $(make image-tag)
         env:
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
           DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}

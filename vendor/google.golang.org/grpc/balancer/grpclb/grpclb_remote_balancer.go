@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/golang/protobuf/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/balancer"
 	"google.golang.org/grpc/connectivity"
@@ -35,9 +36,8 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/resolver"
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
+	timestamppb "github.com/golang/protobuf/ptypes/timestamp"
 	lbpb "google.golang.org/grpc/balancer/grpclb/grpc_lb_v1"
 )
 

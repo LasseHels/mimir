@@ -44,7 +44,6 @@ var (
 
 type Marker interface {
 	markerFilename() string
-	BlockULID() ulid.ULID
 }
 
 // DeletionMark stores block id and when block was marked for deletion.
@@ -60,8 +59,7 @@ type DeletionMark struct {
 	DeletionTime int64 `json:"deletion_time"`
 }
 
-func (d DeletionMark) BlockULID() ulid.ULID   { return d.ID }
-func (d DeletionMark) markerFilename() string { return DeletionMarkFilename }
+func (m *DeletionMark) markerFilename() string { return DeletionMarkFilename }
 
 // NoCompactReason is a reason for a block to be excluded from compaction.
 type NoCompactReason string
@@ -74,8 +72,6 @@ const (
 	IndexSizeExceedingNoCompactReason = "index-size-exceeding"
 	// OutOfOrderChunksNoCompactReason is a reason of to no compact block with index contains out of order chunk so that the compaction is not blocked.
 	OutOfOrderChunksNoCompactReason = "block-index-out-of-order-chunk"
-	// CriticalNoCompactReason is a reason of to no compact block that has some critical issue (e.g. corrupted index).
-	CriticalNoCompactReason = "critical"
 )
 
 // NoCompactMark marker stores reason of block being excluded from compaction if needed.
@@ -92,8 +88,7 @@ type NoCompactMark struct {
 	Reason        NoCompactReason `json:"reason"`
 }
 
-func (n NoCompactMark) BlockULID() ulid.ULID   { return n.ID }
-func (n NoCompactMark) markerFilename() string { return NoCompactMarkFilename }
+func (n *NoCompactMark) markerFilename() string { return NoCompactMarkFilename }
 
 // ReadMarker reads the given mark file from <dir>/<marker filename>.json in bucket.
 // ReadMarker has a one-minute timeout for completing the read against the bucket.

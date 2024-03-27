@@ -17,7 +17,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,6 +26,7 @@ import (
 	"github.com/alecthomas/units"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/pkg/errors"
 	commoncfg "github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
 
@@ -120,7 +120,7 @@ type pagerDutyPayload struct {
 func (n *Notifier) encodeMessage(msg *pagerDutyMessage) (bytes.Buffer, error) {
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(msg); err != nil {
-		return buf, fmt.Errorf("failed to encode PagerDuty message: %w", err)
+		return buf, errors.Wrap(err, "failed to encode PagerDuty message")
 	}
 
 	if buf.Len() > maxEventSize {
@@ -137,7 +137,7 @@ func (n *Notifier) encodeMessage(msg *pagerDutyMessage) (bytes.Buffer, error) {
 
 		buf.Reset()
 		if err := json.NewEncoder(&buf).Encode(msg); err != nil {
-			return buf, fmt.Errorf("failed to encode PagerDuty message: %w", err)
+			return buf, errors.Wrap(err, "failed to encode PagerDuty message")
 		}
 	}
 
@@ -164,7 +164,7 @@ func (n *Notifier) notifyV1(
 	if serviceKey == "" {
 		content, fileErr := os.ReadFile(n.conf.ServiceKeyFile)
 		if fileErr != nil {
-			return false, fmt.Errorf("failed to read service key from file: %w", fileErr)
+			return false, errors.Wrap(fileErr, "failed to read service key from file")
 		}
 		serviceKey = strings.TrimSpace(string(content))
 	}
@@ -183,7 +183,7 @@ func (n *Notifier) notifyV1(
 	}
 
 	if tmplErr != nil {
-		return false, fmt.Errorf("failed to template PagerDuty v1 message: %w", tmplErr)
+		return false, errors.Wrap(tmplErr, "failed to template PagerDuty v1 message")
 	}
 
 	// Ensure that the service key isn't empty after templating.
@@ -198,7 +198,7 @@ func (n *Notifier) notifyV1(
 
 	resp, err := notify.PostJSON(ctx, n.client, n.apiV1, &encodedMsg)
 	if err != nil {
-		return true, fmt.Errorf("failed to post message to PagerDuty v1: %w", err)
+		return true, errors.Wrap(err, "failed to post message to PagerDuty v1")
 	}
 	defer notify.Drain(resp)
 
@@ -229,7 +229,7 @@ func (n *Notifier) notifyV2(
 	if routingKey == "" {
 		content, fileErr := os.ReadFile(n.conf.RoutingKeyFile)
 		if fileErr != nil {
-			return false, fmt.Errorf("failed to read routing key from file: %w", fileErr)
+			return false, errors.Wrap(fileErr, "failed to read routing key from file")
 		}
 		routingKey = strings.TrimSpace(string(content))
 	}
@@ -277,7 +277,7 @@ func (n *Notifier) notifyV2(
 	}
 
 	if tmplErr != nil {
-		return false, fmt.Errorf("failed to template PagerDuty v2 message: %w", tmplErr)
+		return false, errors.Wrap(tmplErr, "failed to template PagerDuty v2 message")
 	}
 
 	// Ensure that the routing key isn't empty after templating.
@@ -292,7 +292,7 @@ func (n *Notifier) notifyV2(
 
 	resp, err := notify.PostJSON(ctx, n.client, n.conf.URL.String(), &encodedMsg)
 	if err != nil {
-		return true, fmt.Errorf("failed to post message to PagerDuty: %w", err)
+		return true, errors.Wrap(err, "failed to post message to PagerDuty")
 	}
 	defer notify.Drain(resp)
 
@@ -325,7 +325,7 @@ func (n *Notifier) Notify(ctx context.Context, as ...*types.Alert) (bool, error)
 	for k, v := range n.conf.Details {
 		detail, err := n.tmpl.ExecuteTextString(v, data)
 		if err != nil {
-			return false, fmt.Errorf("%q: failed to template %q: %w", k, v, err)
+			return false, errors.Wrapf(err, "%q: failed to template %q", k, v)
 		}
 		details[k] = detail
 	}

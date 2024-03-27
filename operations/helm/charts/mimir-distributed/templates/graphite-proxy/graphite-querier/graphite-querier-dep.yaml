@@ -29,10 +29,10 @@ spec:
       {{- end }}
       securityContext:
         {{- include "mimir.lib.podSecurityContext" (dict "ctx" . "component" "graphite-querier") | nindent 8 }}
-      {{- with .Values.graphite.querier.initContainers }}
       initContainers:
+        {{- with .Values.graphite.querier.initContainers }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
       {{- if .Values.image.pullSecrets }}
       imagePullSecrets:
       {{- range .Values.image.pullSecrets }}
@@ -91,11 +91,6 @@ spec:
             {{- with .Values.graphite.querier.env }}
               {{ toYaml . | nindent 12 }}
             {{- end }}
-            {{- $jaeger_queue_size := dig "jaegerReporterMaxQueueSize" nil .Values.graphite.querier }}
-            {{- if $jaeger_queue_size }}
-            - name: "JAEGER_REPORTER_MAX_QUEUE_SIZE"
-              value: {{$jaeger_queue_size | toString | toYaml }}
-            {{- end }}
           envFrom:
             {{- with .Values.global.extraEnvFrom }}
               {{- toYaml . | nindent 12 }}
@@ -103,18 +98,12 @@ spec:
             {{- with .Values.admin_api.extraEnvFrom }}
               {{- toYaml . | nindent 12 }}
             {{- end }}
-      {{- with .Values.graphite.querier.nodeSelector }}
       nodeSelector:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.graphite.querier.affinity }}
+        {{- toYaml .Values.graphite.querier.nodeSelector | nindent 8 }}
       affinity:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.graphite.querier.tolerations }}
+        {{- toYaml .Values.graphite.querier.affinity | nindent 8 }}
       tolerations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- toYaml .Values.graphite.querier.tolerations | nindent 8 }}
       terminationGracePeriodSeconds: {{ .Values.graphite.querier.terminationGracePeriodSeconds }}
       volumes:
         - name: config

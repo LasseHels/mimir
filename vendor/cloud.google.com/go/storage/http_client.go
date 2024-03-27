@@ -74,10 +74,9 @@ func newHTTPStorageClient(ctx context.Context, opts ...storageOption) (storageCl
 		// Prepend default options to avoid overriding options passed by the user.
 		o = append([]option.ClientOption{option.WithScopes(ScopeFullControl, "https://www.googleapis.com/auth/cloud-platform"), option.WithUserAgent(userAgent)}, o...)
 
-		o = append(o, internaloption.WithDefaultEndpointTemplate("https://storage.UNIVERSE_DOMAIN/storage/v1/"),
-			internaloption.WithDefaultMTLSEndpoint("https://storage.mtls.googleapis.com/storage/v1/"),
-			internaloption.WithDefaultUniverseDomain("googleapis.com"),
-		)
+		o = append(o, internaloption.WithDefaultEndpoint("https://storage.googleapis.com/storage/v1/"))
+		o = append(o, internaloption.WithDefaultMTLSEndpoint("https://storage.mtls.googleapis.com/storage/v1/"))
+
 		// Don't error out here. The user may have passed in their own HTTP
 		// client which does not auth with ADC or other common conventions.
 		c, err := transport.Creds(ctx, o...)
@@ -160,7 +159,7 @@ func (c *httpStorageClient) GetServiceAccount(ctx context.Context, project strin
 	return res.EmailAddress, nil
 }
 
-func (c *httpStorageClient) CreateBucket(ctx context.Context, project, bucket string, attrs *BucketAttrs, enableObjectRetention *bool, opts ...storageOption) (*BucketAttrs, error) {
+func (c *httpStorageClient) CreateBucket(ctx context.Context, project, bucket string, attrs *BucketAttrs, opts ...storageOption) (*BucketAttrs, error) {
 	s := callSettings(c.settings, opts...)
 	var bkt *raw.Bucket
 	if attrs != nil {
@@ -181,9 +180,6 @@ func (c *httpStorageClient) CreateBucket(ctx context.Context, project, bucket st
 	}
 	if attrs != nil && attrs.PredefinedDefaultObjectACL != "" {
 		req.PredefinedDefaultObjectAcl(attrs.PredefinedDefaultObjectACL)
-	}
-	if enableObjectRetention != nil {
-		req.EnableObjectRetention(*enableObjectRetention)
 	}
 	var battrs *BucketAttrs
 	err := run(ctx, func(ctx context.Context) error {
@@ -349,7 +345,6 @@ func (c *httpStorageClient) ListObjects(ctx context.Context, bucket string, q *Q
 		req.Versions(it.query.Versions)
 		req.IncludeTrailingDelimiter(it.query.IncludeTrailingDelimiter)
 		req.MatchGlob(it.query.MatchGlob)
-		req.IncludeFoldersAsPrefixes(it.query.IncludeFoldersAsPrefixes)
 		if selection := it.query.toFieldSelection(); selection != "" {
 			req.Fields("nextPageToken", googleapi.Field(selection))
 		}
@@ -436,8 +431,7 @@ func (c *httpStorageClient) GetObject(ctx context.Context, bucket, object string
 	return newObject(obj), nil
 }
 
-func (c *httpStorageClient) UpdateObject(ctx context.Context, params *updateObjectParams, opts ...storageOption) (*ObjectAttrs, error) {
-	uattrs := params.uattrs
+func (c *httpStorageClient) UpdateObject(ctx context.Context, bucket, object string, uattrs *ObjectAttrsToUpdate, gen int64, encryptionKey []byte, conds *Conditions, opts ...storageOption) (*ObjectAttrs, error) {
 	s := callSettings(c.settings, opts...)
 
 	var attrs ObjectAttrs
@@ -502,21 +496,11 @@ func (c *httpStorageClient) UpdateObject(ctx context.Context, params *updateObje
 		// we don't append to nullFields here.
 		forceSendFields = append(forceSendFields, "Acl")
 	}
-	if uattrs.Retention != nil {
-		// For ObjectRetention it's an error to send empty fields.
-		// Instead we send a null as the user's intention is to remove.
-		if uattrs.Retention.Mode == "" && uattrs.Retention.RetainUntil.IsZero() {
-			nullFields = append(nullFields, "Retention")
-		} else {
-			attrs.Retention = uattrs.Retention
-			forceSendFields = append(forceSendFields, "Retention")
-		}
-	}
-	rawObj := attrs.toRawObject(params.bucket)
+	rawObj := attrs.toRawObject(bucket)
 	rawObj.ForceSendFields = forceSendFields
 	rawObj.NullFields = nullFields
-	call := c.raw.Objects.Patch(params.bucket, params.object, rawObj).Projection("full")
-	if err := applyConds("Update", params.gen, params.conds, call); err != nil {
+	call := c.raw.Objects.Patch(bucket, object, rawObj).Projection("full")
+	if err := applyConds("Update", gen, conds, call); err != nil {
 		return nil, err
 	}
 	if s.userProject != "" {
@@ -525,14 +509,9 @@ func (c *httpStorageClient) UpdateObject(ctx context.Context, params *updateObje
 	if uattrs.PredefinedACL != "" {
 		call.PredefinedAcl(uattrs.PredefinedACL)
 	}
-	if err := setEncryptionHeaders(call.Header(), params.encryptionKey, false); err != nil {
+	if err := setEncryptionHeaders(call.Header(), encryptionKey, false); err != nil {
 		return nil, err
 	}
-
-	if params.overrideRetention != nil {
-		call.OverrideUnlockedRetention(*params.overrideRetention)
-	}
-
 	var obj *raw.Object
 	var err error
 	err = run(ctx, func(ctx context.Context) error { obj, err = call.Context(ctx).Do(); return err }, s.retry, s.idempotent)

@@ -70,7 +70,7 @@
     // docs/sources/mimir/manage/monitoring-grafana-mimir/requirements.md
     job_names: {
       ingester: ['ingester.*', 'cortex', 'mimir', 'mimir-write.*'],  // Match also custom and per-zone ingester deployments.
-      distributor: ['distributor.*', 'cortex', 'mimir', 'mimir-write.*'],  // Match also per-zone distributor deployments.
+      distributor: ['distributor', 'cortex', 'mimir', 'mimir-write.*'],
       querier: ['querier.*', 'cortex', 'mimir', 'mimir-read.*'],  // Match also custom querier deployments.
       ruler_querier: ['ruler-querier.*'],  // Match also custom querier deployments.
       ruler: ['ruler', 'cortex', 'mimir', 'mimir-backend.*'],
@@ -78,15 +78,15 @@
       ruler_query_frontend: ['ruler-query-frontend.*'],  // Match also custom ruler-query-frontend deployments.
       query_scheduler: ['query-scheduler.*', 'mimir-backend.*'],  // Not part of single-binary. Match also custom query-scheduler deployments.
       ruler_query_scheduler: ['ruler-query-scheduler.*'],  // Not part of single-binary. Match also custom query-scheduler deployments.
-      ring_members: ['admin-api', 'alertmanager', 'compactor.*', 'distributor.*', 'ingester.*', 'querier.*', 'ruler', 'ruler-querier.*', 'store-gateway.*', 'cortex', 'mimir', 'mimir-write.*', 'mimir-read.*', 'mimir-backend.*'],
+      ring_members: ['admin-api', 'alertmanager', 'compactor.*', 'distributor', 'ingester.*', 'querier.*', 'ruler', 'ruler-querier.*', 'store-gateway.*', 'cortex', 'mimir', 'mimir-write.*', 'mimir-read.*', 'mimir-backend.*'],
       store_gateway: ['store-gateway.*', 'cortex', 'mimir', 'mimir-backend.*'],  // Match also per-zone store-gateway deployments.
-      gateway: ['gateway', 'cortex-gw.*'],  // Match also custom and per-zone gateway deployments.
+      gateway: ['gateway', 'cortex-gw', 'cortex-gw-internal'],
       compactor: ['compactor.*', 'cortex', 'mimir', 'mimir-backend.*'],  // Match also custom compactor deployments.
       alertmanager: ['alertmanager', 'cortex', 'mimir', 'mimir-backend.*'],
       overrides_exporter: ['overrides-exporter', 'mimir-backend.*'],
 
       // The following are job matchers used to select all components in a given "path".
-      write: ['distributor.*', 'ingester.*', 'mimir-write.*'],
+      write: ['distributor', 'ingester.*', 'mimir-write.*'],
       read: ['query-frontend.*', 'querier.*', 'ruler-query-frontend.*', 'ruler-querier.*', 'mimir-read.*'],
       backend: ['ruler', 'query-scheduler.*', 'ruler-query-scheduler.*', 'store-gateway.*', 'compactor.*', 'alertmanager', 'overrides-exporter', 'mimir-backend.*'],
     },
@@ -187,12 +187,6 @@
       cluster_query: 'cortex_build_info',
       namespace_query: 'cortex_build_info{%s=~"$cluster"}' % $._config.per_cluster_label,
     },
-
-    // Used to add extra labels to all alerts. Careful: takes precedence over default labels.
-    alert_extra_labels: {},
-
-    // Used to add extra annotations to all alerts, Careful: takes precedence over default annotations.
-    alert_extra_annotations: {},
 
     cortex_p99_latency_threshold_seconds: 2.5,
 
@@ -587,16 +581,6 @@
       },
     },
 
-    rollout_dashboard: {
-      // workload_label_replaces is used to create label_replace(...) calls on the statefulset and deployment series when rendering the Rollout Dashboard.
-      // Extendable to allow grouping multiple workloads into a single one.
-      workload_label_replaces: [
-        { src_label: 'deployment', regex: '(.+)', replacement: '$1' },
-        { src_label: 'statefulset', regex: '(.+)', replacement: '$1' },
-        { src_label: 'workload', regex: '(.*?)(?:-zone-[a-z])?', replacement: '$1' },
-      ],
-    },
-
     // The label used to differentiate between different nodes (i.e. servers).
     per_node_label: 'instance',
 
@@ -649,9 +633,6 @@
       'debug_pprof',
     ],
 
-    // All query methods from IngesterServer interface. Basically everything except Push.
-    ingester_read_path_routes_regex: '/cortex.Ingester/(QueryStream|QueryExemplars|LabelValues|LabelNames|UserStats|AllUserStats|MetricsForLabelMatchers|MetricsMetadata|LabelNamesAndValues|LabelValuesCardinality|ActiveSeries)',
-
     // The default datasource used for dashboards.
     dashboard_datasource: 'default',
     datasource_regex: '',
@@ -660,10 +641,6 @@
     // Set to at least twice the scrape interval; otherwise, recording rules will output no data.
     // Set to four times the scrape interval to account for edge cases: https://www.robustperception.io/what-range-should-i-use-with-rate/
     recording_rules_range_interval: '1m',
-
-    // Used to calculate range interval in alerts with default range selector under 10 minutes.
-    // Needed to account for edge cases: https://www.robustperception.io/what-range-should-i-use-with-rate/
-    base_alerts_range_interval_minutes: 1,
 
     // Used to inject rows into dashboards at specific places that support it.
     injectRows: {},
@@ -678,11 +655,5 @@
     // Disabled by default, because when -ingester.limit-inflight-requests-using-grpc-method-limiter and -distributor.limit-inflight-requests-using-grpc-method-limiter is
     // not used (default), then rejected requests are already counted as failures.
     show_rejected_requests_on_writes_dashboard: false,
-
-    // Show panels that use queries for gRPC-based ingestion (distributor -> ingester)
-    show_grpc_ingestion_panels: true,
-
-    // Show panels that use queries for "ingest storage" ingestion (distributor -> Kafka, Kafka -> ingesters)
-    show_ingest_storage_panels: false,
   },
 }

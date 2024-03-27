@@ -35,6 +35,7 @@ import (
 	"github.com/prometheus/prometheus/model/rulefmt"
 	"github.com/prometheus/prometheus/notifier"
 	"github.com/prometheus/prometheus/promql"
+	"github.com/prometheus/prometheus/rules"
 	promRules "github.com/prometheus/prometheus/rules"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/util/testutil"
@@ -1640,7 +1641,7 @@ func TestSendAlerts(t *testing.T) {
 				}
 				require.Equal(t, tc.exp, alerts)
 			})
-			promRules.SendAlerts(senderFunc, "http://localhost:9090")(context.TODO(), "up", tc.in...)
+			rules.SendAlerts(senderFunc, "http://localhost:9090")(context.TODO(), "up", tc.in...)
 		})
 	}
 }

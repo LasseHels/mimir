@@ -64,14 +64,11 @@ var (
 	)
 	remoteReadQueryDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Namespace:                       namespace,
-			Subsystem:                       subsystem,
-			Name:                            "read_request_duration_seconds",
-			Help:                            "Histogram of the latency for remote read requests.",
-			Buckets:                         append(prometheus.DefBuckets, 25, 60),
-			NativeHistogramBucketFactor:     1.1,
-			NativeHistogramMaxBucketNumber:  100,
-			NativeHistogramMinResetDuration: 1 * time.Hour,
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "read_request_duration_seconds",
+			Help:      "Histogram of the latency for remote read requests.",
+			Buckets:   append(prometheus.DefBuckets, 25, 60),
 		},
 		[]string{remoteName, endpoint},
 	)
@@ -144,22 +141,22 @@ func NewWriteClient(name string, conf *ClientConfig) (WriteClient, error) {
 	}
 	t := httpClient.Transport
 
-	if len(conf.Headers) > 0 {
-		t = newInjectHeadersRoundTripper(conf.Headers, t)
-	}
-
 	if conf.SigV4Config != nil {
-		t, err = sigv4.NewSigV4RoundTripper(conf.SigV4Config, t)
+		t, err = sigv4.NewSigV4RoundTripper(conf.SigV4Config, httpClient.Transport)
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	if conf.AzureADConfig != nil {
-		t, err = azuread.NewAzureADRoundTripper(conf.AzureADConfig, t)
+		t, err = azuread.NewAzureADRoundTripper(conf.AzureADConfig, httpClient.Transport)
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	if len(conf.Headers) > 0 {
+		t = newInjectHeadersRoundTripper(conf.Headers, t)
 	}
 
 	httpClient.Transport = otelhttp.NewTransport(t)

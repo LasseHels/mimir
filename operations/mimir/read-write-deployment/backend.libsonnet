@@ -5,7 +5,6 @@
   local pvc = $.core.v1.persistentVolumeClaim,
   local statefulSet = $.apps.v1.statefulSet,
   local volumeMount = $.core.v1.volumeMount,
-  local envVar = $.core.v1.envVar,
 
   // Utils.
   local gossipLabel = $.apps.v1.statefulSet.spec.template.metadata.withLabelsMixin({ [$._config.gossip_member_label]: 'true' }),
@@ -41,11 +40,6 @@
   mimir_backend_zone_b_args:: $.store_gateway_zone_b_args {},
   mimir_backend_zone_c_args:: $.store_gateway_zone_c_args {},
 
-  mimir_backend_node_affinity_matchers:: [],
-  mimir_backend_zone_a_node_affinity_matchers:: $.mimir_backend_node_affinity_matchers,
-  mimir_backend_zone_b_node_affinity_matchers:: $.mimir_backend_node_affinity_matchers,
-  mimir_backend_zone_c_node_affinity_matchers:: $.mimir_backend_node_affinity_matchers,
-
   mimir_backend_ports::
     std.uniq(
       std.sort(
@@ -62,10 +56,7 @@
     $.util.resourcesRequests(1, '12Gi') +
     $.util.resourcesLimits(null, '18Gi') +
     $.util.readinessProbe +
-    $.jaeger_mixin +
-    container.withEnvMixin([
-      envVar.new('JAEGER_REPORTER_MAX_QUEUE_SIZE', '1000'),
-    ]),
+    $.jaeger_mixin,
 
   local mimir_backend_data_pvc =
     pvc.new() +
@@ -86,11 +77,10 @@
       }
     )),
 
-  newMimirBackendZoneStatefulset(zone, container, nodeAffinityMatchers=[])::
+  newMimirBackendZoneStatefulset(zone, container)::
     local name = 'mimir-backend-zone-%s' % zone;
 
     $.newMimirStatefulSet(name, 3, container, mimir_backend_data_pvc) +
-    $.newMimirNodeAffinityMatchers(nodeAffinityMatchers) +
     statefulSet.mixin.metadata.withLabels({ 'rollout-group': 'mimir-backend' }) +
     statefulSet.mixin.metadata.withAnnotations({ 'rollout-max-unavailable': std.toString($._config.mimir_backend_max_unavailable) }) +
     statefulSet.mixin.spec.template.metadata.withLabels({ name: name, 'rollout-group': 'mimir-backend' }) +
@@ -133,13 +123,13 @@
     $.newMimirBackendZoneContainer('c', $.mimir_backend_zone_c_args),
 
   mimir_backend_zone_a_statefulset: if !$._config.is_read_write_deployment_mode then null else
-    $.newMimirBackendZoneStatefulset('a', $.mimir_backend_zone_a_container, $.mimir_backend_zone_a_node_affinity_matchers),
+    $.newMimirBackendZoneStatefulset('a', $.mimir_backend_zone_a_container),
 
   mimir_backend_zone_b_statefulset: if !$._config.is_read_write_deployment_mode then null else
-    $.newMimirBackendZoneStatefulset('b', $.mimir_backend_zone_b_container, $.mimir_backend_zone_b_node_affinity_matchers),
+    $.newMimirBackendZoneStatefulset('b', $.mimir_backend_zone_b_container),
 
   mimir_backend_zone_c_statefulset: if !$._config.is_read_write_deployment_mode then null else
-    $.newMimirBackendZoneStatefulset('c', $.mimir_backend_zone_c_container, $.mimir_backend_zone_c_node_affinity_matchers),
+    $.newMimirBackendZoneStatefulset('c', $.mimir_backend_zone_c_container),
 
   mimir_backend_zone_a_service: if !$._config.is_read_write_deployment_mode then null else
     $.newMimirBackendZoneService($.mimir_backend_zone_a_statefulset),

@@ -13,10 +13,10 @@ metadata:
 spec:
   tls:
     - hosts:
-        - "gateway-enterprise-values.mimir.example.com"
+        - "mimir.example.com"
       secretName: mimir-tls
   rules:
-    - host: "gateway-enterprise-values.mimir.example.com"
+    - host: "mimir.example.com"
       http:
         paths:
           - path: /

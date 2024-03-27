@@ -6,40 +6,33 @@ metadata:
   labels:
     {{- include "mimir.labels" (dict "ctx" .) | nindent 4 }}
   annotations:
-    "seccomp.security.alpha.kubernetes.io/allowedProfileNames": {{ .Values.rbac.podSecurityPolicy.seccompProfile }}
+    "seccomp.security.alpha.kubernetes.io/allowedProfileNames": runtime/default
 spec:
-  privileged: {{ .Values.rbac.podSecurityPolicy.privileged }}
-  allowPrivilegeEscalation: {{ .Values.rbac.podSecurityPolicy.allowPrivilegeEscalation }}
+  privileged: false
+  allowPrivilegeEscalation: false
   volumes:
     - 'configMap'
     - 'emptyDir'
     - 'persistentVolumeClaim'
     - 'secret'
-    {{- range $volumes := .Values.rbac.podSecurityPolicy.additionalVolumes }}
-    - '{{ $volumes }}'
-    {{- end }}
-  hostNetwork: {{ .Values.rbac.podSecurityPolicy.hostNetwork }}
-  hostIPC: {{ .Values.rbac.podSecurityPolicy.hostIPC }}
-  hostPID: {{ .Values.rbac.podSecurityPolicy.hostPID }}
+  hostNetwork: false
+  hostIPC: false
+  hostPID: false
   runAsUser:
-    rule: {{ .Values.rbac.podSecurityPolicy.runAsUser.rule }}
+    rule: 'MustRunAsNonRoot'
   seLinux:
-    rule: {{ .Values.rbac.podSecurityPolicy.seLinux.rule }}
+    rule: 'RunAsAny'
   supplementalGroups:
-    rule: {{ .Values.rbac.podSecurityPolicy.supplementalGroups.rule }}
+    rule: 'MustRunAs'
     ranges:
-    {{- range $range := .Values.rbac.podSecurityPolicy.supplementalGroups.ranges }}
-    - min: {{ $range.min }}
-      max: {{ $range.max }}
-    {{- end }}
+    - min: 1
+      max: 65535
   fsGroup:
-    rule: {{ .Values.rbac.podSecurityPolicy.fsGroup.rule }}
+    rule: 'MustRunAs'
     ranges:
-    {{- range $range := .Values.rbac.podSecurityPolicy.fsGroup.ranges }}
-    - min: {{ $range.min }}
-      max: {{ $range.max }}
-    {{- end }}
-  readOnlyRootFilesystem: {{ .Values.rbac.podSecurityPolicy.readOnlyRootFilesystem }}
+    - min: 1
+      max: 65535
+  readOnlyRootFilesystem: true
   requiredDropCapabilities:
     - ALL
 {{- end }}

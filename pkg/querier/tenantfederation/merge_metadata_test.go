@@ -9,7 +9,7 @@ import (
 
 	"github.com/grafana/dskit/tenant"
 	"github.com/grafana/dskit/user"
-	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/model/textparse"
 	"github.com/prometheus/prometheus/scrape"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -39,12 +39,12 @@ func (m *mockMetadataSupplier) MetricsMetadata(ctx context.Context, _ *client.Me
 func TestMergeMetadataSupplier_MetricsMetadata(t *testing.T) {
 	fixtureMetadata1 := scrape.MetricMetadata{
 		Metric: "up",
-		Type:   model.MetricTypeGauge,
+		Type:   textparse.MetricTypeGauge,
 	}
 
 	fixtureMetadata2 := scrape.MetricMetadata{
 		Metric: "requests",
-		Type:   model.MetricTypeCounter,
+		Type:   textparse.MetricTypeCounter,
 	}
 
 	t.Run("invalid tenant IDs", func(t *testing.T) {

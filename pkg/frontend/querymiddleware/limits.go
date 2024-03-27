@@ -13,7 +13,6 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
-	"github.com/grafana/dskit/cancellation"
 	"github.com/grafana/dskit/tenant"
 	"github.com/grafana/dskit/user"
 	"github.com/opentracing/opentracing-go"
@@ -26,8 +25,6 @@ import (
 	"github.com/grafana/mimir/pkg/util/spanlogger"
 	"github.com/grafana/mimir/pkg/util/validation"
 )
-
-var errExecutingParallelQueriesFinished = cancellation.NewErrorf("executing parallel queries finished")
 
 // Limits allows us to specify per-tenant runtime limits on the behavior of
 // the query handling code.
@@ -100,23 +97,17 @@ type Limits interface {
 
 	// BlockedQueries returns the blocked queries.
 	BlockedQueries(userID string) []*validation.BlockedQuery
-
-	// AlignQueriesWithStep returns if queries should be adjusted to be step-aligned
-	AlignQueriesWithStep(userID string) bool
-
-	// QueryIngestersWithin returns the maximum lookback beyond which queries are not sent to ingester.
-	QueryIngestersWithin(userID string) time.Duration
 }
 
 type limitsMiddleware struct {
 	Limits
-	next   MetricsQueryHandler
+	next   Handler
 	logger log.Logger
 }
 
-// newLimitsMiddleware creates a new MetricsQueryMiddleware that enforces query limits.
-func newLimitsMiddleware(l Limits, logger log.Logger) MetricsQueryMiddleware {
-	return MetricsQueryMiddlewareFunc(func(next MetricsQueryHandler) MetricsQueryHandler {
+// newLimitsMiddleware creates a new Middleware that enforces query limits.
+func newLimitsMiddleware(l Limits, logger log.Logger) Middleware {
+	return MiddlewareFunc(func(next Handler) Handler {
 		return limitsMiddleware{
 			next:   next,
 			Limits: l,
@@ -125,7 +116,7 @@ func newLimitsMiddleware(l Limits, logger log.Logger) MetricsQueryMiddleware {
 	})
 }
 
-func (l limitsMiddleware) Do(ctx context.Context, r MetricsQueryRequest) (Response, error) {
+func (l limitsMiddleware) Do(ctx context.Context, r Request) (Response, error) {
 	log, ctx := spanlogger.NewWithLogger(ctx, l.logger, "limits")
 	defer log.Finish()
 
@@ -185,7 +176,7 @@ func (l limitsMiddleware) Do(ctx context.Context, r MetricsQueryRequest) (Respon
 	if maxQuerySize := validation.SmallestPositiveNonZeroIntPerTenant(tenantIDs, l.MaxQueryExpressionSizeBytes); maxQuerySize > 0 {
 		querySize := len(r.GetQuery())
 		if querySize > maxQuerySize {
-			return nil, newMaxQueryExpressionSizeBytesError(querySize, maxQuerySize)
+			return nil, apierror.New(apierror.TypeBadData, validation.NewMaxQueryExpressionSizeBytesError(querySize, maxQuerySize).Error())
 		}
 	}
 
@@ -193,7 +184,7 @@ func (l limitsMiddleware) Do(ctx context.Context, r MetricsQueryRequest) (Respon
 	if maxQueryLength := validation.SmallestPositiveNonZeroDurationPerTenant(tenantIDs, l.MaxTotalQueryLength); maxQueryLength > 0 {
 		queryLen := timestamp.Time(r.GetEnd()).Sub(timestamp.Time(r.GetStart()))
 		if queryLen > maxQueryLength {
-			return nil, newMaxTotalQueryLengthError(queryLen, maxQueryLength)
+			return nil, apierror.New(apierror.TypeBadData, validation.NewMaxTotalQueryLengthError(queryLen, maxQueryLength).Error())
 		}
 	}
 
@@ -201,15 +192,15 @@ func (l limitsMiddleware) Do(ctx context.Context, r MetricsQueryRequest) (Respon
 }
 
 type limitedParallelismRoundTripper struct {
-	downstream MetricsQueryHandler
+	downstream Handler
 	limits     Limits
 
 	codec      Codec
-	middleware MetricsQueryMiddleware
+	middleware Middleware
 }
 
 // newLimitedParallelismRoundTripper creates a new roundtripper that enforces MaxQueryParallelism to the `next` roundtripper across `middlewares`.
-func newLimitedParallelismRoundTripper(next http.RoundTripper, codec Codec, limits Limits, middlewares ...MetricsQueryMiddleware) http.RoundTripper {
+func newLimitedParallelismRoundTripper(next http.RoundTripper, codec Codec, limits Limits, middlewares ...Middleware) http.RoundTripper {
 	return limitedParallelismRoundTripper{
 		downstream: roundTripperHandler{
 			next:  next,
@@ -217,21 +208,21 @@ func newLimitedParallelismRoundTripper(next http.RoundTripper, codec Codec, limi
 		},
 		codec:      codec,
 		limits:     limits,
-		middleware: MergeMetricsQueryMiddlewares(middlewares...),
+		middleware: MergeMiddlewares(middlewares...),
 	}
 }
 
 func (rt limitedParallelismRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
-	ctx, cancel := context.WithCancelCause(r.Context())
-	defer cancel(errExecutingParallelQueriesFinished)
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
 
-	request, err := rt.codec.DecodeMetricsQueryRequest(ctx, r)
+	request, err := rt.codec.DecodeRequest(ctx, r)
 	if err != nil {
 		return nil, err
 	}
 
 	if span := opentracing.SpanFromContext(ctx); span != nil {
-		request.AddSpanTags(span)
+		request.LogToSpan(span)
 	}
 	tenantIDs, err := tenant.TenantIDs(ctx)
 	if err != nil {
@@ -246,7 +237,7 @@ func (rt limitedParallelismRoundTripper) RoundTrip(r *http.Request) (*http.Respo
 	// parallel from upstream handlers and ensure that no more than MaxQueryParallelism
 	// sub-requests run in parallel.
 	response, err := rt.middleware.Wrap(
-		HandlerFunc(func(ctx context.Context, r MetricsQueryRequest) (Response, error) {
+		HandlerFunc(func(ctx context.Context, r Request) (Response, error) {
 			if err := sem.Acquire(ctx, 1); err != nil {
 				return nil, fmt.Errorf("could not acquire work: %w", err)
 			}
@@ -261,17 +252,17 @@ func (rt limitedParallelismRoundTripper) RoundTrip(r *http.Request) (*http.Respo
 	return rt.codec.EncodeResponse(ctx, r, response)
 }
 
-// roundTripperHandler is an adapter that implements the MetricsQueryHandler interface using a http.RoundTripper to perform
+// roundTripperHandler is an adapter that implements the Handler interface using a http.RoundTripper to perform
 // the requests and a Codec to translate between http Request/Response model and this package's Request/Response model.
-// It basically encodes a MetricsQueryRequest from MetricsQueryHandler.Do and decodes response from next roundtripper.
+// It basically encodes a Request from Handler.Do and decodes response from next roundtripper.
 type roundTripperHandler struct {
 	logger log.Logger
 	next   http.RoundTripper
 	codec  Codec
 }
 
-func (rth roundTripperHandler) Do(ctx context.Context, r MetricsQueryRequest) (Response, error) {
-	request, err := rth.codec.EncodeMetricsQueryRequest(ctx, r)
+func (rth roundTripperHandler) Do(ctx context.Context, r Request) (Response, error) {
+	request, err := rth.codec.EncodeRequest(ctx, r)
 	if err != nil {
 		return nil, err
 	}

@@ -3,16 +3,15 @@ local filename = 'mimir-object-store.json';
 
 (import 'dashboard-utils.libsonnet') {
   [filename]:
-    assert std.md5(filename) == 'e1324ee2a434f4158c00a9ee279d3292' : 'UID of the dashboard has changed, please update references to dashboard.';
     ($.dashboard('Object Store') + { uid: std.md5(filename) })
     .addClusterSelectorTemplates()
     .addRow(
       $.row('Components')
       .addPanel(
-        $.timeseriesPanel('RPS / component') +
+        $.panel('RPS / component') +
         $.queryPanel('sum by(component) (rate(thanos_objstore_bucket_operations_total{%s}[$__rate_interval]))' % $.namespaceMatcher(), '{{component}}') +
         $.stack +
-        { fieldConfig+: { defaults+: { unit: 'reqps' } } },
+        { yaxes: $.yaxes('reqps') },
       )
       .addPanel(
         $.timeseriesPanel('Error rate / component') +
@@ -23,10 +22,10 @@ local filename = 'mimir-object-store.json';
     .addRow(
       $.row('Operations')
       .addPanel(
-        $.timeseriesPanel('RPS / operation') +
+        $.panel('RPS / operation') +
         $.queryPanel('sum by(operation) (rate(thanos_objstore_bucket_operations_total{%s}[$__rate_interval]))' % $.namespaceMatcher(), '{{operation}}') +
         $.stack +
-        { fieldConfig+: { defaults+: { unit: 'reqps' } } },
+        { yaxes: $.yaxes('reqps') },
       )
       .addPanel(
         $.timeseriesPanel('Error rate / operation') +
@@ -37,30 +36,30 @@ local filename = 'mimir-object-store.json';
     .addRow(
       $.row('')
       .addPanel(
-        $.timeseriesPanel('Op: Get') +
+        $.panel('Op: Get') +
         $.latencyPanel('thanos_objstore_bucket_operation_duration_seconds', '{%s,operation="get"}' % $.namespaceMatcher()),
       )
       .addPanel(
-        $.timeseriesPanel('Op: GetRange') +
+        $.panel('Op: GetRange') +
         $.latencyPanel('thanos_objstore_bucket_operation_duration_seconds', '{%s,operation="get_range"}' % $.namespaceMatcher()),
       )
       .addPanel(
-        $.timeseriesPanel('Op: Exists') +
+        $.panel('Op: Exists') +
         $.latencyPanel('thanos_objstore_bucket_operation_duration_seconds', '{%s,operation="exists"}' % $.namespaceMatcher()),
       )
     )
     .addRow(
       $.row('')
       .addPanel(
-        $.timeseriesPanel('Op: Attributes') +
+        $.panel('Op: Attributes') +
         $.latencyPanel('thanos_objstore_bucket_operation_duration_seconds', '{%s,operation="attributes"}' % $.namespaceMatcher()),
       )
       .addPanel(
-        $.timeseriesPanel('Op: Upload') +
+        $.panel('Op: Upload') +
         $.latencyPanel('thanos_objstore_bucket_operation_duration_seconds', '{%s,operation="upload"}' % $.namespaceMatcher()),
       )
       .addPanel(
-        $.timeseriesPanel('Op: Delete') +
+        $.panel('Op: Delete') +
         $.latencyPanel('thanos_objstore_bucket_operation_duration_seconds', '{%s,operation="delete"}' % $.namespaceMatcher()),
       )
     ),

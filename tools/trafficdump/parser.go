@@ -134,9 +134,7 @@ func (rp *parser) processHTTPRequest(req *http.Request, body []byte) *request {
 
 	if rp.decodePush && req.Method == "POST" && strings.Contains(req.URL.Path, "/push") {
 		var matched bool
-		rb := util.NewRequestBuffers(&bufferPool)
-		r.cleanup = rb.CleanUp
-		r.PushRequest, matched = rp.decodePushRequest(req, body, rp.matchers, rb)
+		r.PushRequest, r.cleanup, matched = rp.decodePushRequest(req, body, rp.matchers)
 		if !matched {
 			r.ignored = true
 		}
@@ -154,19 +152,35 @@ func (rp *parser) processHTTPRequest(req *http.Request, body []byte) *request {
 	return &r
 }
 
-var bufferPool = sync.Pool{
-	New: func() any {
-		return bytes.NewBuffer(make([]byte, 0, 256*1024))
-	},
+// Wrap a slice in a struct so we can store a pointer in sync.Pool
+type bufHolder struct {
+	buf []byte
 }
 
-func (rp *parser) decodePushRequest(req *http.Request, body []byte, matchers []*labels.Matcher, buffers *util.RequestBuffers) (*pushRequest, bool) {
+var bufferPool = sync.Pool{
+	New: func() interface{} { return &bufHolder{buf: make([]byte, 256*1024)} },
+}
+
+func (rp *parser) decodePushRequest(req *http.Request, body []byte, matchers []*labels.Matcher) (*pushRequest, func(), bool) {
 	res := &pushRequest{Version: req.Header.Get("X-Prometheus-Remote-Write-Version")}
 
+	bufHolder := bufferPool.Get().(*bufHolder)
+
+	cleanup := func() {
+		bufferPool.Put(bufHolder)
+	}
+
 	var wr mimirpb.WriteRequest
-	if err := util.ParseProtoReader(context.Background(), bytes.NewReader(body), int(req.ContentLength), 100<<20, buffers, &wr, util.RawSnappy); err != nil {
+	buf, err := util.ParseProtoReader(context.Background(), bytes.NewReader(body), int(req.ContentLength), 100<<20, bufHolder.buf, &wr, util.RawSnappy)
+	if err != nil {
+		cleanup()
 		res.Error = fmt.Errorf("failed to decode decodePush request: %s", err).Error()
-		return nil, true
+		return nil, nil, true
+	}
+
+	// If decoding allocated a bigger buffer, put that one back in the pool.
+	if len(buf) > len(bufHolder.buf) {
+		bufHolder.buf = buf
 	}
 
 	// See if we find the matching series. If not, we ignore this request.
@@ -181,7 +195,8 @@ func (rp *parser) decodePushRequest(req *http.Request, body []byte, matchers []*
 		}
 
 		if !matched {
-			return nil, false
+			cleanup()
+			return nil, nil, false
 		}
 	}
 
@@ -203,7 +218,7 @@ func (rp *parser) decodePushRequest(req *http.Request, body []byte, matchers []*
 
 	res.Metadata = wr.Metadata
 
-	return res, true
+	return res, cleanup, true
 }
 
 func matches(lbls labels.Labels, matchers []*labels.Matcher) bool {

@@ -17,11 +17,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"strings"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
@@ -55,7 +52,6 @@ type teamsMessage struct {
 	Context    string `json:"@context"`
 	Type       string `json:"type"`
 	Title      string `json:"title"`
-	Summary    string `json:"summary"`
 	Text       string `json:"text"`
 	ThemeColor string `json:"themeColor"`
 }
@@ -102,10 +98,6 @@ func (n *Notifier) Notify(ctx context.Context, as ...*types.Alert) (bool, error)
 	if err != nil {
 		return false, err
 	}
-	summary := tmpl(n.conf.Summary)
-	if err != nil {
-		return false, err
-	}
 
 	alerts := types.Alerts(as...)
 	color := colorGrey
@@ -116,22 +108,10 @@ func (n *Notifier) Notify(ctx context.Context, as ...*types.Alert) (bool, error)
 		color = colorGreen
 	}
 
-	var url string
-	if n.conf.WebhookURL != nil {
-		url = n.conf.WebhookURL.String()
-	} else {
-		content, err := os.ReadFile(n.conf.WebhookURLFile)
-		if err != nil {
-			return false, fmt.Errorf("read webhook_url_file: %w", err)
-		}
-		url = strings.TrimSpace(string(content))
-	}
-
 	t := teamsMessage{
 		Context:    "http://schema.org/extensions",
 		Type:       "MessageCard",
 		Title:      title,
-		Summary:    summary,
 		Text:       text,
 		ThemeColor: color,
 	}
@@ -141,7 +121,7 @@ func (n *Notifier) Notify(ctx context.Context, as ...*types.Alert) (bool, error)
 		return false, err
 	}
 
-	resp, err := n.postJSONFunc(ctx, n.client, url, &payload)
+	resp, err := n.postJSONFunc(ctx, n.client, n.webhookURL.String(), &payload)
 	if err != nil {
 		return true, notify.RedactURL(err)
 	}

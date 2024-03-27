@@ -11,7 +11,6 @@ import (
 	"reflect"
 	"sort"
 	"testing"
-	"time"
 	"unsafe"
 
 	"github.com/stretchr/testify/assert"
@@ -117,20 +116,6 @@ func TestDeepCopyTimeseries(t *testing.T) {
 				{Value: 1, TimestampMs: 2},
 				{Value: 3, TimestampMs: 4},
 			},
-			Histograms: []Histogram{
-				{
-					Timestamp:      4*time.Minute.Milliseconds() - 1,
-					Count:          &Histogram_CountInt{CountInt: 35},
-					Sum:            108,
-					ZeroCount:      &Histogram_ZeroCountInt{ZeroCountInt: 2},
-					ZeroThreshold:  0.01,
-					NegativeSpans:  []BucketSpan{{Offset: -1, Length: 1}, {Offset: -2, Length: 1}},
-					NegativeDeltas: []int64{7, 3},
-					PositiveSpans:  []BucketSpan{{Offset: 0, Length: 1}, {Offset: 2, Length: 1}},
-					PositiveDeltas: []int64{2, 21},
-					ResetHint:      Histogram_UNKNOWN,
-				},
-			},
 			Exemplars: []Exemplar{{
 				Value:       1,
 				TimestampMs: 2,
@@ -142,7 +127,7 @@ func TestDeepCopyTimeseries(t *testing.T) {
 		},
 	}
 	dst := PreallocTimeseries{}
-	dst = DeepCopyTimeseries(dst, src, true, true)
+	dst = DeepCopyTimeseries(dst, src, true)
 
 	// Check that the values in src and dst are the same.
 	assert.Equal(t, src.TimeSeries, dst.TimeSeries)
@@ -161,44 +146,22 @@ func TestDeepCopyTimeseries(t *testing.T) {
 		(*reflect.SliceHeader)(unsafe.Pointer(&dst.Samples)).Data,
 	)
 	assert.NotEqual(t,
-		(*reflect.SliceHeader)(unsafe.Pointer(&src.Histograms)).Data,
-		(*reflect.SliceHeader)(unsafe.Pointer(&dst.Histograms)).Data,
-	)
-	assert.NotEqual(t,
 		(*reflect.SliceHeader)(unsafe.Pointer(&src.Exemplars)).Data,
 		(*reflect.SliceHeader)(unsafe.Pointer(&dst.Exemplars)).Data,
 	)
-	for histogramIdx := range src.Histograms {
-		assert.NotEqual(t,
-			(*reflect.SliceHeader)(unsafe.Pointer(&src.Histograms[histogramIdx].NegativeSpans)).Data,
-			(*reflect.SliceHeader)(unsafe.Pointer(&dst.Histograms[histogramIdx].NegativeSpans)).Data,
-		)
-		assert.NotEqual(t,
-			(*reflect.SliceHeader)(unsafe.Pointer(&src.Histograms[histogramIdx].NegativeDeltas)).Data,
-			(*reflect.SliceHeader)(unsafe.Pointer(&dst.Histograms[histogramIdx].NegativeDeltas)).Data,
-		)
-		assert.NotEqual(t,
-			(*reflect.SliceHeader)(unsafe.Pointer(&src.Histograms[histogramIdx].PositiveSpans)).Data,
-			(*reflect.SliceHeader)(unsafe.Pointer(&dst.Histograms[histogramIdx].PositiveSpans)).Data,
-		)
-		assert.NotEqual(t,
-			(*reflect.SliceHeader)(unsafe.Pointer(&src.Histograms[histogramIdx].PositiveDeltas)).Data,
-			(*reflect.SliceHeader)(unsafe.Pointer(&dst.Histograms[histogramIdx].PositiveDeltas)).Data,
-		)
-	}
-
 	for exemplarIdx := range src.Exemplars {
 		assert.NotEqual(t,
 			(*reflect.SliceHeader)(unsafe.Pointer(&src.Exemplars[exemplarIdx].Labels)).Data,
 			(*reflect.SliceHeader)(unsafe.Pointer(&dst.Exemplars[exemplarIdx].Labels)).Data,
 		)
 	}
+	assert.Nil(t, dst.Histograms)
 
 	dst = PreallocTimeseries{}
-	dst = DeepCopyTimeseries(dst, src, false, false)
+	dst = DeepCopyTimeseries(dst, src, false)
 	assert.NotNil(t, dst.Exemplars)
 	assert.Len(t, dst.Exemplars, 0)
-	assert.Len(t, dst.Histograms, 0)
+	assert.Nil(t, dst.Histograms)
 }
 
 func TestDeepCopyTimeseriesExemplars(t *testing.T) {
@@ -227,10 +190,10 @@ func TestDeepCopyTimeseriesExemplars(t *testing.T) {
 	}
 
 	dst1 := PreallocTimeseries{}
-	dst1 = DeepCopyTimeseries(dst1, src, false, false)
+	dst1 = DeepCopyTimeseries(dst1, src, false)
 
 	dst2 := PreallocTimeseries{}
-	dst2 = DeepCopyTimeseries(dst2, src, false, true)
+	dst2 = DeepCopyTimeseries(dst2, src, true)
 
 	// dst1 should use much smaller buffer than dst2.
 	assert.Less(t, cap(*dst1.yoloSlice), cap(*dst2.yoloSlice))

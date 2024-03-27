@@ -71,10 +71,7 @@ type CompositeClient[T, U any] struct {
 }
 
 func InnerClients[T, U any](client *CompositeClient[T, U]) (*Client[T], *U) {
-	return &Client[T]{
-		inner:      client.innerT,
-		credential: client.sharedKey,
-	}, client.innerU
+	return &Client[T]{inner: client.innerT}, client.innerU
 }
 
 func NewAppendBlobClient(blobURL string, azClient *azcore.Client, sharedKey *exported.SharedKeyCredential) *CompositeClient[generated.BlobClient, generated.AppendBlobClient] {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/units"
+	"github.com/go-kit/log"
 	"github.com/pkg/errors"
 	"github.com/prometheus/prometheus/tsdb"
 	"github.com/prometheus/prometheus/tsdb/chunks"
@@ -82,18 +83,6 @@ const (
 	// 32 value is chosen as it's a good balance for common setups. Sampling that is not too large (too many CPU cycles) and
 	// not too small (too much memory).
 	DefaultPostingOffsetInMemorySampling = 32
-
-	// DefaultPostingsForMatchersCacheMaxBytes setting puts a limit cap on the per-TSDB head/block max PostingsForMatchers() cache size in bytes.
-	// This limit is *in addition* to the max size in items (default to 100 items).
-	//
-	// This value is most useful on Mimir clusters with 1 tenant. If the tenant runs very high cardinality
-	// queries (e.g. a query touching 1M series / ingester) then with the previous default cache
-	// size of 10MB we may not be able to effectively use the cache.
-	//
-	// A single cached posting takes about 9 bytes in the cache, on average. The default max cache size as number of items
-	// is 100, so having a 100MB cache per-tenant for the TSDB Head means we can cache 100MB / 100 / 9 = 116k postings
-	// per cached entry on average.
-	DefaultPostingsForMatchersCacheMaxBytes = 100 * 1024 * 1024
 
 	// DefaultPartitionerMaxGapSize is the default max size - in bytes - of a gap for which the store-gateway
 	// partitioner aggregates together two bucket GET object requests.
@@ -177,7 +166,7 @@ func (cfg *BlocksStorageConfig) RegisterFlags(f *flag.FlagSet) {
 }
 
 // Validate the config.
-func (cfg *BlocksStorageConfig) Validate(activeSeriesCfg activeseries.Config) error {
+func (cfg *BlocksStorageConfig) Validate(activeSeriesCfg activeseries.Config, logger log.Logger) error {
 	if err := cfg.Bucket.Validate(); err != nil {
 		return err
 	}
@@ -186,7 +175,7 @@ func (cfg *BlocksStorageConfig) Validate(activeSeriesCfg activeseries.Config) er
 		return err
 	}
 
-	return cfg.BucketStore.Validate()
+	return cfg.BucketStore.Validate(logger)
 }
 
 // TSDBConfig holds the config for TSDB opened in the ingesters.
@@ -263,13 +252,6 @@ type TSDBConfig struct {
 
 	// HeadCompactionIntervalJitterEnabled is enabled by default, but allows to disable it in tests.
 	HeadCompactionIntervalJitterEnabled bool `yaml:"-"`
-
-	// HeadCompactionIntervalWhileStarting setting is hardcoded, but allowed to overwrite it in tests.
-	HeadCompactionIntervalWhileStarting time.Duration `yaml:"-"`
-
-	// TimelyHeadCompaction allows head compaction to happen when min block range can no longer be appended,
-	// without requiring 1.5x the chunk range worth of data in the head.
-	TimelyHeadCompaction bool `yaml:"timely_head_compaction_enabled" category:"experimental"`
 }
 
 // RegisterFlags registers the TSDBConfig flags.
@@ -306,18 +288,16 @@ func (cfg *TSDBConfig) RegisterFlags(f *flag.FlagSet) {
 	f.IntVar(&cfg.OutOfOrderCapacityMax, "blocks-storage.tsdb.out-of-order-capacity-max", 32, "Maximum capacity for out of order chunks, in samples between 1 and 255.")
 	f.DurationVar(&cfg.HeadPostingsForMatchersCacheTTL, "blocks-storage.tsdb.head-postings-for-matchers-cache-ttl", tsdb.DefaultPostingsForMatchersCacheTTL, "How long to cache postings for matchers in the Head and OOOHead. 0 disables the cache and just deduplicates the in-flight calls.")
 	f.IntVar(&cfg.HeadPostingsForMatchersCacheMaxItems, "blocks-storage.tsdb.head-postings-for-matchers-cache-size", tsdb.DefaultPostingsForMatchersCacheMaxItems, "Maximum number of entries in the cache for postings for matchers in the Head and OOOHead when TTL is greater than 0.")
-	f.Int64Var(&cfg.HeadPostingsForMatchersCacheMaxBytes, "blocks-storage.tsdb.head-postings-for-matchers-cache-max-bytes", DefaultPostingsForMatchersCacheMaxBytes, "Maximum size in bytes of the cache for postings for matchers in the Head and OOOHead when TTL is greater than 0.")
+	f.Int64Var(&cfg.HeadPostingsForMatchersCacheMaxBytes, "blocks-storage.tsdb.head-postings-for-matchers-cache-max-bytes", tsdb.DefaultPostingsForMatchersCacheMaxBytes, "Maximum size in bytes of the cache for postings for matchers in the Head and OOOHead when TTL is greater than 0.")
 	f.BoolVar(&cfg.HeadPostingsForMatchersCacheForce, "blocks-storage.tsdb.head-postings-for-matchers-cache-force", tsdb.DefaultPostingsForMatchersCacheForce, "Force the cache to be used for postings for matchers in the Head and OOOHead, even if it's not a concurrent (query-sharding) call.")
 	f.DurationVar(&cfg.BlockPostingsForMatchersCacheTTL, "blocks-storage.tsdb.block-postings-for-matchers-cache-ttl", tsdb.DefaultPostingsForMatchersCacheTTL, "How long to cache postings for matchers in each compacted block queried from the ingester. 0 disables the cache and just deduplicates the in-flight calls.")
 	f.IntVar(&cfg.BlockPostingsForMatchersCacheMaxItems, "blocks-storage.tsdb.block-postings-for-matchers-cache-size", tsdb.DefaultPostingsForMatchersCacheMaxItems, "Maximum number of entries in the cache for postings for matchers in each compacted block when TTL is greater than 0.")
-	f.Int64Var(&cfg.BlockPostingsForMatchersCacheMaxBytes, "blocks-storage.tsdb.block-postings-for-matchers-cache-max-bytes", DefaultPostingsForMatchersCacheMaxBytes, "Maximum size in bytes of the cache for postings for matchers in each compacted block when TTL is greater than 0.")
+	f.Int64Var(&cfg.BlockPostingsForMatchersCacheMaxBytes, "blocks-storage.tsdb.block-postings-for-matchers-cache-max-bytes", tsdb.DefaultPostingsForMatchersCacheMaxBytes, "Maximum size in bytes of the cache for postings for matchers in each compacted block when TTL is greater than 0.")
 	f.BoolVar(&cfg.BlockPostingsForMatchersCacheForce, "blocks-storage.tsdb.block-postings-for-matchers-cache-force", tsdb.DefaultPostingsForMatchersCacheForce, "Force the cache to be used for postings for matchers in compacted blocks, even if it's not a concurrent (query-sharding) call.")
 	f.Int64Var(&cfg.EarlyHeadCompactionMinInMemorySeries, "blocks-storage.tsdb.early-head-compaction-min-in-memory-series", 0, fmt.Sprintf("When the number of in-memory series in the ingester is equal to or greater than this setting, the ingester tries to compact the TSDB Head. The early compaction removes from the memory all samples and inactive series up until -%s time ago. After an early compaction, the ingester will not accept any sample with a timestamp older than -%s time ago (unless out of order ingestion is enabled). The ingester checks every -%s whether an early compaction is required. Use 0 to disable it.", activeseries.IdleTimeoutFlag, activeseries.IdleTimeoutFlag, headCompactionIntervalFlag))
 	f.IntVar(&cfg.EarlyHeadCompactionMinEstimatedSeriesReductionPercentage, "blocks-storage.tsdb.early-head-compaction-min-estimated-series-reduction-percentage", 15, "When the early compaction is enabled, the early compaction is triggered only if the estimated series reduction is at least the configured percentage (0-100).")
-	f.BoolVar(&cfg.TimelyHeadCompaction, "blocks-storage.tsdb.timely-head-compaction-enabled", false, "Allows head compaction to happen when the min block range can no longer be appended, without requiring 1.5x the chunk range worth of data in the head.")
 
 	cfg.HeadCompactionIntervalJitterEnabled = true
-	cfg.HeadCompactionIntervalWhileStarting = 30 * time.Second
 }
 
 // Validate the config.
@@ -402,6 +382,10 @@ type BucketStoreConfig struct {
 	// Series hash cache.
 	SeriesHashCacheMaxBytes uint64 `yaml:"series_hash_cache_max_size_bytes" category:"advanced"`
 
+	// Controls whether index-header lazy loading is enabled.
+	DeprecatedIndexHeaderLazyLoadingEnabled     bool          `yaml:"index_header_lazy_loading_enabled" category:"deprecated"`      // Deprecated. TODO: Remove in Mimir 2.12.
+	DeprecatedIndexHeaderLazyLoadingIdleTimeout time.Duration `yaml:"index_header_lazy_loading_idle_timeout" category:"deprecated"` // Deprecated. TODO: Remove in Mimir 2.12.
+
 	// Controls the partitioner, used to aggregate multiple GET object API requests.
 	PartitionerMaxGapBytes uint64 `yaml:"partitioner_max_gap_bytes" category:"advanced"`
 
@@ -412,8 +396,8 @@ type BucketStoreConfig struct {
 	// 1 will keep all in memory. Default value is the same as in Prometheus which gives a good balance.
 	PostingOffsetsInMemSampling int `yaml:"postings_offsets_in_mem_sampling" category:"advanced"`
 
-	// Controls advanced options for index-header file reading.
-	IndexHeader indexheader.Config `yaml:"index_header" category:"advanced"`
+	// Controls experimental options for index-header file reading.
+	IndexHeader indexheader.Config `yaml:"index_header" category:"experimental"`
 
 	StreamingBatchSize          int    `yaml:"streaming_series_batch_size" category:"advanced"`
 	SeriesSelectionStrategyName string `yaml:"series_selection_strategy" category:"experimental"`
@@ -448,13 +432,15 @@ func (cfg *BucketStoreConfig) RegisterFlags(f *flag.FlagSet) {
 	f.DurationVar(&cfg.SyncInterval, "blocks-storage.bucket-store.sync-interval", 15*time.Minute, "How frequently to scan the bucket, or to refresh the bucket index (if enabled), in order to look for changes (new blocks shipped by ingesters and blocks deleted by retention or compaction).")
 	f.Uint64Var(&cfg.SeriesHashCacheMaxBytes, "blocks-storage.bucket-store.series-hash-cache-max-size-bytes", uint64(1*units.Gibibyte), "Max size - in bytes - of the in-memory series hash cache. The cache is shared across all tenants and it's used only when query sharding is enabled.")
 	f.IntVar(&cfg.MaxConcurrent, "blocks-storage.bucket-store.max-concurrent", 100, "Max number of concurrent queries to execute against the long-term storage. The limit is shared across all tenants.")
-	f.IntVar(&cfg.TenantSyncConcurrency, "blocks-storage.bucket-store.tenant-sync-concurrency", 1, "Maximum number of concurrent tenants synching blocks.")
-	f.IntVar(&cfg.BlockSyncConcurrency, "blocks-storage.bucket-store.block-sync-concurrency", 4, "Maximum number of concurrent blocks synching per tenant.")
+	f.IntVar(&cfg.TenantSyncConcurrency, "blocks-storage.bucket-store.tenant-sync-concurrency", 10, "Maximum number of concurrent tenants synching blocks.")
+	f.IntVar(&cfg.BlockSyncConcurrency, "blocks-storage.bucket-store.block-sync-concurrency", 20, "Maximum number of concurrent blocks synching per tenant.")
 	f.IntVar(&cfg.MetaSyncConcurrency, "blocks-storage.bucket-store.meta-sync-concurrency", 20, "Number of Go routines to use when syncing block meta files from object storage per tenant.")
 	f.DurationVar(&cfg.IgnoreDeletionMarksDelay, "blocks-storage.bucket-store.ignore-deletion-marks-delay", time.Hour*1, "Duration after which the blocks marked for deletion will be filtered out while fetching blocks. "+
 		"The idea of ignore-deletion-marks-delay is to ignore blocks that are marked for deletion with some delay. This ensures store can still serve blocks that are meant to be deleted but do not have a replacement yet.")
 	f.DurationVar(&cfg.IgnoreBlocksWithin, "blocks-storage.bucket-store.ignore-blocks-within", 10*time.Hour, "Blocks with minimum time within this duration are ignored, and not loaded by store-gateway. Useful when used together with -querier.query-store-after to prevent loading young blocks, because there are usually many of them (depending on number of ingesters) and they are not yet compacted. Negative values or 0 disable the filter.")
 	f.IntVar(&cfg.PostingOffsetsInMemSampling, "blocks-storage.bucket-store.posting-offsets-in-mem-sampling", DefaultPostingOffsetInMemorySampling, "Controls what is the ratio of postings offsets that the store will hold in memory.")
+	f.BoolVar(&cfg.DeprecatedIndexHeaderLazyLoadingEnabled, "blocks-storage.bucket-store.index-header-lazy-loading-enabled", indexheader.DefaultIndexHeaderLazyLoadingEnabled, "If enabled, store-gateway will lazy load an index-header only once required by a query.")
+	f.DurationVar(&cfg.DeprecatedIndexHeaderLazyLoadingIdleTimeout, "blocks-storage.bucket-store.index-header-lazy-loading-idle-timeout", indexheader.DefaultIndexHeaderLazyLoadingIdleTimeout, "If index-header lazy loading is enabled and this setting is > 0, the store-gateway will offload unused index-headers after 'idle timeout' inactivity.")
 	f.Uint64Var(&cfg.PartitionerMaxGapBytes, "blocks-storage.bucket-store.partitioner-max-gap-bytes", DefaultPartitionerMaxGapSize, "Max size - in bytes - of a gap for which the partitioner aggregates together two bucket GET object requests.")
 	f.IntVar(&cfg.StreamingBatchSize, "blocks-storage.bucket-store.batch-series-size", 5000, "This option controls how many series to fetch per batch. The batch size must be greater than 0.")
 	f.StringVar(&cfg.SeriesSelectionStrategyName, seriesSelectionStrategyFlag, WorstCasePostingsStrategy, "This option controls the strategy to selection of series and deferring application of matchers. A more aggressive strategy will fetch less posting lists at the cost of more series. This is useful when querying large blocks in which many series share the same label name and value. Supported values (most aggressive to least aggressive): "+strings.Join(validSeriesSelectionStrategies, ", ")+".")
@@ -462,7 +448,7 @@ func (cfg *BucketStoreConfig) RegisterFlags(f *flag.FlagSet) {
 }
 
 // Validate the config.
-func (cfg *BucketStoreConfig) Validate() error {
+func (cfg *BucketStoreConfig) Validate(logger log.Logger) error {
 	if cfg.StreamingBatchSize <= 0 {
 		return errInvalidStreamingBatchSize
 	}
@@ -475,7 +461,7 @@ func (cfg *BucketStoreConfig) Validate() error {
 	if err := cfg.MetadataCache.Validate(); err != nil {
 		return errors.Wrap(err, "metadata-cache configuration")
 	}
-	if err := cfg.BucketIndex.Validate(); err != nil {
+	if err := cfg.BucketIndex.Validate(logger); err != nil {
 		return errors.Wrap(err, "bucket-index configuration")
 	}
 	if !util.StringsContain(validSeriesSelectionStrategies, cfg.SeriesSelectionStrategyName) {
@@ -503,6 +489,6 @@ func (cfg *BucketIndexConfig) RegisterFlagsWithPrefix(f *flag.FlagSet, prefix st
 }
 
 // Validate the config.
-func (cfg *BucketIndexConfig) Validate() error {
+func (cfg *BucketIndexConfig) Validate(_ log.Logger) error {
 	return nil
 }

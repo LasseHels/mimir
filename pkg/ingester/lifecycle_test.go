@@ -38,7 +38,6 @@ func defaultIngesterTestConfig(t testing.TB) Config {
 	cfg := Config{}
 	flagext.DefaultValues(&cfg)
 	flagext.DefaultValues(&cfg.BlocksStorageConfig)
-	flagext.DefaultValues(&cfg.IngestStorageConfig)
 	cfg.IngesterRing.KVStore.Mock = consul
 	cfg.IngesterRing.NumTokens = 1
 	cfg.IngesterRing.ListenPort = 0
@@ -69,7 +68,7 @@ func TestIngesterRestart(t *testing.T) {
 	config.IngesterRing.UnregisterOnShutdown = false
 
 	{
-		ing, err := prepareIngesterWithBlocksStorageAndLimits(t, config, limits, nil, "", nil)
+		ing, err := prepareIngesterWithBlocksStorageAndLimits(t, config, limits, "", nil)
 		require.NoError(t, err)
 
 		require.NoError(t, services.StartAndAwaitRunning(context.Background(), ing))
@@ -84,7 +83,7 @@ func TestIngesterRestart(t *testing.T) {
 	})
 
 	{
-		ing, err := prepareIngesterWithBlocksStorageAndLimits(t, config, limits, nil, "", nil)
+		ing, err := prepareIngesterWithBlocksStorageAndLimits(t, config, limits, "", nil)
 		require.NoError(t, err)
 
 		require.NoError(t, services.StartAndAwaitRunning(context.Background(), ing))
@@ -108,7 +107,7 @@ func TestIngester_ShutdownHandler(t *testing.T) {
 			limits := defaultLimitsTestConfig()
 			config.IngesterRing.UnregisterOnShutdown = unregister
 
-			ing, err := prepareIngesterWithBlocksStorageAndLimits(t, config, limits, nil, "", nil)
+			ing, err := prepareIngesterWithBlocksStorageAndLimits(t, config, limits, "", nil)
 			require.NoError(t, err)
 			defer services.StopAndAwaitTerminated(context.Background(), ing) //nolint:errcheck
 

@@ -17,9 +17,8 @@ import (
 func TestDecodeLabelNamesRequest(t *testing.T) {
 	var (
 		params = url.Values{
-			"selector":     []string{`{second!="2",first="1"}`},
-			"count_method": []string{"active"},
-			"limit":        []string{"100"},
+			"selector": []string{`{second!="2",first="1"}`},
+			"limit":    []string{"100"},
 		}
 
 		expected = &LabelNamesRequest{
@@ -27,8 +26,7 @@ func TestDecodeLabelNamesRequest(t *testing.T) {
 				labels.MustNewMatcher(labels.MatchEqual, "first", "1"),
 				labels.MustNewMatcher(labels.MatchNotEqual, "second", "2"),
 			},
-			CountMethod: ActiveMethod,
-			Limit:       100,
+			Limit: 100,
 		}
 	)
 
@@ -67,11 +65,10 @@ func TestLabelNamesRequest_String(t *testing.T) {
 			labels.MustNewMatcher(labels.MatchEqual, "first", "1"),
 			labels.MustNewMatcher(labels.MatchNotEqual, "second", "2"),
 		},
-		CountMethod: ActiveMethod,
-		Limit:       100,
+		Limit: 100,
 	}
 
-	assert.Equal(t, "first=\"1\"\x01second!=\"2\"\x00active\x00100", req.String())
+	assert.Equal(t, "first=\"1\"\x01second!=\"2\"\x00100", req.String())
 }
 
 func TestDecodeLabelValuesRequest(t *testing.T) {

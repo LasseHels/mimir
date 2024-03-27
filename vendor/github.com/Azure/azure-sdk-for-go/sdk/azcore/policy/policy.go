@@ -29,11 +29,9 @@ type Transporter = exported.Transporter
 type Request = exported.Request
 
 // ClientOptions contains optional settings for a client's pipeline.
-// Instances can be shared across calls to SDK client constructors when uniform configuration is desired.
-// Zero-value fields will have their specified default values applied during use.
+// All zero-value fields will be initialized with default values.
 type ClientOptions struct {
-	// APIVersion overrides the default version requested of the service.
-	// Set with caution as this package version has not been tested with arbitrary service versions.
+	// APIVersion overrides the default version requested of the service. Set with caution as this package version has not been tested with arbitrary service versions.
 	APIVersion string
 
 	// Cloud specifies a cloud for the client. The default is Azure Public Cloud.

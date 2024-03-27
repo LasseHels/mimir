@@ -559,12 +559,9 @@ OUTER:
 }
 
 func verifyChunks(cr *chunks.Reader, cm chunks.Meta) error {
-	ch, iter, err := cr.ChunkOrIterable(cm)
+	ch, err := cr.Chunk(cm)
 	if err != nil {
 		return errors.Wrapf(err, "failed to read chunk %d", cm.Ref)
-	}
-	if iter != nil {
-		return errors.Errorf("chunk %d: ChunkOrIterable shouldn't return an iterable", cm.Ref)
 	}
 
 	cb := ch.Bytes()
@@ -580,11 +577,17 @@ func verifyChunks(cr *chunks.Reader, cm chunks.Meta) error {
 	for valType := it.Next(); valType != chunkenc.ValNone; valType = it.Next() {
 		samples++
 
-		if valType != chunkenc.ValFloat && valType != chunkenc.ValHistogram && valType != chunkenc.ValFloatHistogram {
+		var ts int64
+		switch valType {
+		case chunkenc.ValFloat:
+			ts, _ = it.At()
+		case chunkenc.ValHistogram:
+			ts, _ = it.AtHistogram()
+		case chunkenc.ValFloatHistogram:
+			ts, _ = it.AtFloatHistogram()
+		default:
 			return errors.Errorf("unsupported value type %v in chunk %d", valType, cm.Ref)
 		}
-
-		ts := it.AtT()
 
 		if firstSample {
 			firstSample = false
@@ -677,14 +680,10 @@ func rewrite(
 		builder.Sort()
 
 		for i, c := range chks {
-			chunk, iter, err := chunkr.ChunkOrIterable(c)
+			chks[i].Chunk, err = chunkr.Chunk(c)
 			if err != nil {
 				return errors.Wrap(err, "chunk read")
 			}
-			if iter != nil {
-				return errors.New("unexpected chunk iterable returned")
-			}
-			chks[i].Chunk = chunk
 		}
 
 		chks, err := sanitizeChunkSequence(chks, meta.MinTime, meta.MaxTime, ignoreChkFns)

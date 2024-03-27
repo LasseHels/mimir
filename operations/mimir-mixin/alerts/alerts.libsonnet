@@ -34,15 +34,14 @@ local utils = import 'mixin-utils/utils.libsonnet';
           // Note if alert_aggregation_labels is "job", this will repeat the label. But
           // prometheus seems to tolerate that.
           expr: |||
-            100 * sum by (%(group_by)s, %(job_label)s, route) (rate(cortex_request_duration_seconds_count{status_code=~"5..",route!~"%(excluded_routes)s"}[%(range_interval)s]))
+            100 * sum by (%(group_by)s, %(job_label)s, route) (rate(cortex_request_duration_seconds_count{status_code=~"5..",route!~"%(excluded_routes)s"}[1m]))
               /
-            sum by (%(group_by)s, %(job_label)s, route) (rate(cortex_request_duration_seconds_count{route!~"%(excluded_routes)s"}[%(range_interval)s]))
+            sum by (%(group_by)s, %(job_label)s, route) (rate(cortex_request_duration_seconds_count{route!~"%(excluded_routes)s"}[1m]))
               > 1
           ||| % {
             group_by: $._config.alert_aggregation_labels,
             job_label: $._config.per_job_label,
             excluded_routes: std.join('|', ['ready'] + $._config.alert_excluded_routes),
-            range_interval: $.alertRangeInterval(1),
           },
           'for': '15m',
           labels: {
@@ -82,13 +81,10 @@ local utils = import 'mixin-utils/utils.libsonnet';
         {
           alert: $.alertName('QueriesIncorrect'),
           expr: |||
-            100 * sum by (%(group_by)s) (rate(test_exporter_test_case_result_total{result="fail"}[%(range_interval)s]))
+            100 * sum by (%s) (rate(test_exporter_test_case_result_total{result="fail"}[5m]))
               /
-            sum by (%(group_by)s) (rate(test_exporter_test_case_result_total[%(range_interval)s])) > 1
-          ||| % {
-            group_by: $._config.alert_aggregation_labels,
-            range_interval: $.alertRangeInterval(5),
-          },
+            sum by (%s) (rate(test_exporter_test_case_result_total[5m])) > 1
+          ||| % [$._config.alert_aggregation_labels, $._config.alert_aggregation_labels],
           'for': '15m',
           labels: {
             severity: 'warning',
@@ -134,12 +130,8 @@ local utils = import 'mixin-utils/utils.libsonnet';
         {
           alert: $.alertName('FrontendQueriesStuck'),
           expr: |||
-            sum by (%(group_by)s, %(job_label)s) (min_over_time(cortex_query_frontend_queue_length[%(range_interval)s])) > 0
-          ||| % {
-            group_by: $._config.alert_aggregation_labels,
-            job_label: $._config.per_job_label,
-            range_interval: $.alertRangeInterval(1),
-          },
+            sum by (%(alert_aggregation_labels)s, %(per_job_label)s) (min_over_time(cortex_query_frontend_queue_length[1m])) > 0
+          ||| % $._config,
           'for': '5m',  // We don't want to block for longer.
           labels: {
             severity: 'critical',
@@ -153,12 +145,8 @@ local utils = import 'mixin-utils/utils.libsonnet';
         {
           alert: $.alertName('SchedulerQueriesStuck'),
           expr: |||
-            sum by (%(group_by)s, %(job_label)s) (min_over_time(cortex_query_scheduler_queue_length[%(range_interval)s])) > 0
-          ||| % {
-            group_by: $._config.alert_aggregation_labels,
-            job_label: $._config.per_job_label,
-            range_interval: $.alertRangeInterval(1),
-          },
+            sum by (%(alert_aggregation_labels)s, %(per_job_label)s) (min_over_time(cortex_query_scheduler_queue_length[1m])) > 0
+          ||| % $._config,
           'for': '7m',  // We don't want to block for longer.
           labels: {
             severity: 'critical',
@@ -173,22 +161,19 @@ local utils = import 'mixin-utils/utils.libsonnet';
           alert: $.alertName('CacheRequestErrors'),
           expr: |||
             (
-              sum by(%(group_by)s, name, operation) (
-                rate(thanos_memcached_operation_failures_total[%(range_interval)s])
+              sum by(%s, name, operation) (
+                rate(thanos_memcached_operation_failures_total[1m])
                 or
-                rate(thanos_cache_operation_failures_total[%(range_interval)s])
+                rate(thanos_cache_operation_failures_total[1m])
               )
               /
-              sum by(%(group_by)s, name, operation) (
-                rate(thanos_memcached_operations_total[%(range_interval)s])
+              sum by(%s, name, operation) (
+                rate(thanos_memcached_operations_total[1m])
                 or
-                rate(thanos_cache_operations_total[%(range_interval)s])
+                rate(thanos_cache_operations_total[1m])
               )
             ) * 100 > 5
-          ||| % {
-            group_by: $._config.alert_aggregation_labels,
-            range_interval: $.alertRangeInterval(1),
-          },
+          ||| % [$._config.alert_aggregation_labels, $._config.alert_aggregation_labels],
           'for': '5m',
           labels: {
             severity: 'warning',
@@ -230,15 +215,13 @@ local utils = import 'mixin-utils/utils.libsonnet';
           alert: $.alertName('KVStoreFailure'),
           expr: |||
             (
-              sum by(%(alert_aggregation_labels)s, %(per_instance_label)s, status_code, kv_name) (rate(cortex_kv_request_duration_seconds_count{status_code!~"2.+"}[%(range_interval)s]))
+              sum by(%(alert_aggregation_labels)s, %(per_instance_label)s, status_code, kv_name) (rate(cortex_kv_request_duration_seconds_count{status_code!~"2.+"}[1m]))
               /
-              sum by(%(alert_aggregation_labels)s, %(per_instance_label)s, status_code, kv_name) (rate(cortex_kv_request_duration_seconds_count[%(range_interval)s]))
+              sum by(%(alert_aggregation_labels)s, %(per_instance_label)s, status_code, kv_name) (rate(cortex_kv_request_duration_seconds_count[1m]))
             )
             # We want to get alerted only in case there's a constant failure.
             == 1
-          ||| % $._config {
-            range_interval: $.alertRangeInterval(1),
-          },
+          ||| % $._config,
           'for': '5m',
           labels: {
             severity: 'critical',
@@ -327,22 +310,6 @@ local utils = import 'mixin-utils/utils.libsonnet';
           },
           annotations: {
             message: '%(product)s ingester %(alert_instance_variable)s in %(alert_aggregation_variables)s has ingested samples with timestamps more than 1h in the future.' % $._config,
-          },
-        },
-        {
-          alert: $.alertName('StoreGatewayTooManyFailedOperations'),
-          'for': '5m',
-          expr: |||
-            sum by(%(alert_aggregation_labels)s, operation) (rate(thanos_objstore_bucket_operation_failures_total{component="store-gateway"}[%(range_interval)s])) > 0
-          ||| % {
-            alert_aggregation_labels: $._config.alert_aggregation_labels,
-            range_interval: $.alertRangeInterval(1),
-          },
-          labels: {
-            severity: 'warning',
-          },
-          annotations: {
-            message: '%(product)s store-gateway %(alert_instance_variable)s in %(alert_aggregation_variables)s is experiencing {{ $value | humanizePercentage }} errors while doing {{ $labels.operation }} on the object storage.' % $._config,
           },
         },
       ] + [
@@ -520,7 +487,7 @@ local utils = import 'mixin-utils/utils.libsonnet';
                 %(kube_statefulset_status_replicas_updated)s
               )
             ) and (
-              changes(%(kube_statefulset_status_replicas_updated)s[%(range_interval)s])
+              changes(%(kube_statefulset_status_replicas_updated)s[15m:1m])
                 ==
               0
             )
@@ -531,7 +498,6 @@ local utils = import 'mixin-utils/utils.libsonnet';
             kube_statefulset_status_update_revision: groupStatefulSetByRolloutGroup('kube_statefulset_status_update_revision'),
             kube_statefulset_replicas: groupStatefulSetByRolloutGroup('kube_statefulset_replicas'),
             kube_statefulset_status_replicas_updated: groupStatefulSetByRolloutGroup('kube_statefulset_status_replicas_updated'),
-            range_interval: '15m:' + $.alertRangeInterval(1),
           },
           'for': '30m',
           labels: {
@@ -552,7 +518,7 @@ local utils = import 'mixin-utils/utils.libsonnet';
                 !=
               %(kube_deployment_status_replicas_updated)s
             ) and (
-              changes(%(kube_deployment_status_replicas_updated)s[%(range_interval)s])
+              changes(%(kube_deployment_status_replicas_updated)s[15m:1m])
                 ==
               0
             )
@@ -561,7 +527,6 @@ local utils = import 'mixin-utils/utils.libsonnet';
             aggregation_labels: $._config.alert_aggregation_labels,
             kube_deployment_spec_replicas: groupDeploymentByRolloutGroup('kube_deployment_spec_replicas'),
             kube_deployment_status_replicas_updated: groupDeploymentByRolloutGroup('kube_deployment_status_replicas_updated'),
-            range_interval: '15m:' + $.alertRangeInterval(1),
           },
           'for': '30m',
           labels: {
@@ -639,13 +604,11 @@ local utils = import 'mixin-utils/utils.libsonnet';
           alert: $.alertName('RulerTooManyFailedPushes'),
           expr: |||
             100 * (
-            sum by (%(alert_aggregation_labels)s, %(per_instance_label)s) (rate(cortex_ruler_write_requests_failed_total[%(range_interval)s]))
+            sum by (%(alert_aggregation_labels)s, %(per_instance_label)s) (rate(cortex_ruler_write_requests_failed_total[1m]))
               /
-            sum by (%(alert_aggregation_labels)s, %(per_instance_label)s) (rate(cortex_ruler_write_requests_total[%(range_interval)s]))
+            sum by (%(alert_aggregation_labels)s, %(per_instance_label)s) (rate(cortex_ruler_write_requests_total[1m]))
             ) > 1
-          ||| % $._config {
-            range_interval: $.alertRangeInterval(1),
-          },
+          ||| % $._config,
           'for': '5m',
           labels: {
             severity: 'critical',
@@ -660,13 +623,11 @@ local utils = import 'mixin-utils/utils.libsonnet';
           alert: $.alertName('RulerTooManyFailedQueries'),
           expr: |||
             100 * (
-            sum by (%(alert_aggregation_labels)s, %(per_instance_label)s) (rate(cortex_ruler_queries_failed_total[%(range_interval)s]))
+            sum by (%(alert_aggregation_labels)s, %(per_instance_label)s) (rate(cortex_ruler_queries_failed_total[1m]))
               /
-            sum by (%(alert_aggregation_labels)s, %(per_instance_label)s) (rate(cortex_ruler_queries_total[%(range_interval)s]))
+            sum by (%(alert_aggregation_labels)s, %(per_instance_label)s) (rate(cortex_ruler_queries_total[1m]))
             ) > 1
-          ||| % $._config {
-            range_interval: $.alertRangeInterval(1),
-          },
+          ||| % $._config,
           'for': '5m',
           labels: {
             severity: 'critical',
@@ -681,13 +642,11 @@ local utils = import 'mixin-utils/utils.libsonnet';
           alert: $.alertName('RulerMissedEvaluations'),
           expr: |||
             100 * (
-            sum by (%(alert_aggregation_labels)s, %(per_instance_label)s, rule_group) (rate(cortex_prometheus_rule_group_iterations_missed_total[%(range_interval)s]))
+            sum by (%(alert_aggregation_labels)s, %(per_instance_label)s, rule_group) (rate(cortex_prometheus_rule_group_iterations_missed_total[1m]))
               /
-            sum by (%(alert_aggregation_labels)s, %(per_instance_label)s, rule_group) (rate(cortex_prometheus_rule_group_iterations_total[%(range_interval)s]))
+            sum by (%(alert_aggregation_labels)s, %(per_instance_label)s, rule_group) (rate(cortex_prometheus_rule_group_iterations_total[1m]))
             ) > 1
-          ||| % $._config {
-            range_interval: $.alertRangeInterval(1),
-          },
+          ||| % $._config,
           'for': '5m',
           labels: {
             severity: 'warning',
@@ -701,11 +660,9 @@ local utils = import 'mixin-utils/utils.libsonnet';
         {
           alert: $.alertName('RulerFailedRingCheck'),
           expr: |||
-            sum by (%(alert_aggregation_labels)s, %(per_job_label)s) (rate(cortex_ruler_ring_check_errors_total[%(range_interval)s]))
+            sum by (%(alert_aggregation_labels)s, %(per_job_label)s) (rate(cortex_ruler_ring_check_errors_total[1m]))
                > 0
-          ||| % $._config {
-            range_interval: $.alertRangeInterval(1),
-          },
+          ||| % $._config,
           'for': '5m',
           labels: {
             severity: 'critical',
@@ -720,15 +677,11 @@ local utils = import 'mixin-utils/utils.libsonnet';
           alert: $.alertName('RulerRemoteEvaluationFailing'),
           expr: |||
             100 * (
-            sum by (%(alert_aggregation_labels)s) (rate(cortex_request_duration_seconds_count{route="/httpgrpc.HTTP/Handle", status_code=~"5..", %(job_regex)s}[%(range_interval)s]))
+            sum by (%s) (rate(cortex_request_duration_seconds_count{route="/httpgrpc.HTTP/Handle", status_code=~"5..", %s}[5m]))
               /
-            sum by (%(alert_aggregation_labels)s) (rate(cortex_request_duration_seconds_count{route="/httpgrpc.HTTP/Handle", %(job_regex)s}[%(range_interval)s]))
+            sum by (%s) (rate(cortex_request_duration_seconds_count{route="/httpgrpc.HTTP/Handle", %s}[5m]))
             ) > 1
-          ||| % {
-            alert_aggregation_labels: $._config.alert_aggregation_labels,
-            job_regex: $.jobMatcher($._config.job_names.ruler_query_frontend),
-            range_interval: $.alertRangeInterval(5),
-          },
+          ||| % [$._config.alert_aggregation_labels, $.jobMatcher($._config.job_names.ruler_query_frontend), $._config.alert_aggregation_labels, $.jobMatcher($._config.job_names.ruler_query_frontend)],
           'for': '5m',
           labels: {
             severity: 'warning',
@@ -835,5 +788,5 @@ local utils = import 'mixin-utils/utils.libsonnet';
     },
   ],
 
-  groups+: $.withRunbookURL('https://grafana.com/docs/mimir/latest/operators-guide/mimir-runbooks/#%s', $.withExtraLabelsAnnotations(alertGroups)),
+  groups+: $.withRunbookURL('https://grafana.com/docs/mimir/latest/operators-guide/mimir-runbooks/#%s', alertGroups),
 }

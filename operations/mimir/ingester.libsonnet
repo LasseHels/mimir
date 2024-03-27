@@ -39,9 +39,6 @@
       // requested just because it spikes during the WAL replay. Therefore, the WAL replay
       // concurrency is chosen in such a way that it is always less than the current CPU request.
       'blocks-storage.tsdb.wal-replay-concurrency': std.max(1, std.floor($.util.parseCPU($.ingester_container.resources.requests.cpu) - 1)),
-
-      // Relax pressure on KV store when running at scale.
-      'ingester.ring.heartbeat-period': '2m',
     } + (
       // Optionally configure the TSDB head early compaction (only when enabled).
       if !$._config.ingester_tsdb_head_early_compaction_enabled then {} else {
@@ -54,11 +51,7 @@
 
   local name = 'ingester',
 
-  ingester_env_map:: {
-    JAEGER_REPORTER_MAX_QUEUE_SIZE: '1000',
-  },
-
-  ingester_node_affinity_matchers:: [],
+  ingester_env_map:: {},
 
   ingester_container::
     container.new(name, $._images.ingester) +
@@ -78,27 +71,21 @@
     pvc.mixin.spec.withStorageClassName($._config.ingester_data_disk_class) +
     pvc.mixin.metadata.withName('ingester-data'),
 
-  newIngesterStatefulSet(name, container, withAntiAffinity=true, nodeAffinityMatchers=[])::
+  newIngesterStatefulSet(name, container, with_anti_affinity=true)::
     local ingesterContainer = container + $.core.v1.container.withVolumeMountsMixin([
       volumeMount.new('ingester-data', '/data'),
     ]);
 
     $.newMimirStatefulSet(name, 3, ingesterContainer, ingester_data_pvc) +
-    $.newMimirNodeAffinityMatchers(nodeAffinityMatchers) +
     // When the ingester needs to flush blocks to the storage, it may take quite a lot of time.
     // For this reason, we grant an high termination period (80 minutes).
     statefulSet.mixin.spec.template.spec.withTerminationGracePeriodSeconds(1200) +
     $.mimirVolumeMounts +
     $.util.podPriority('high') +
-    (if withAntiAffinity then $.util.antiAffinity else {}),
+    (if with_anti_affinity then $.util.antiAffinity else {}),
 
   ingester_statefulset: if !$._config.is_microservices_deployment_mode then null else
-    self.newIngesterStatefulSet(
-      'ingester',
-      $.ingester_container + (if std.length($.ingester_env_map) > 0 then container.withEnvMap(std.prune($.ingester_env_map)) else {}),
-      !$._config.ingester_allow_multiple_replicas_on_same_node,
-      $.ingester_node_affinity_matchers,
-    ),
+    self.newIngesterStatefulSet('ingester', $.ingester_container + (if std.length($.ingester_env_map) > 0 then container.withEnvMap(std.prune($.ingester_env_map)) else {}), !$._config.ingester_allow_multiple_replicas_on_same_node),
 
   ingester_service: if !$._config.is_microservices_deployment_mode then null else
     $.util.serviceFor($.ingester_statefulset, $._config.service_ignored_labels),

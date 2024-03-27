@@ -17,6 +17,7 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/model/textparse"
 	"github.com/prometheus/prometheus/prompb"
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/storage/remote"
@@ -153,22 +154,22 @@ func TestMetricMetadataToMetricTypeToMetricType(t *testing.T) {
 	tc := []struct {
 		desc     string
 		input    MetricMetadata_MetricType
-		expected model.MetricType
+		expected textparse.MetricType
 	}{
 		{
 			desc:     "with a single-word metric",
 			input:    COUNTER,
-			expected: model.MetricTypeCounter,
+			expected: textparse.MetricTypeCounter,
 		},
 		{
 			desc:     "with a two-word metric",
 			input:    STATESET,
-			expected: model.MetricTypeStateset,
+			expected: textparse.MetricTypeStateset,
 		},
 		{
 			desc:     "with an unknown metric",
 			input:    MetricMetadata_MetricType(100),
-			expected: model.MetricTypeUnknown,
+			expected: textparse.MetricTypeUnknown,
 		},
 	}
 

@@ -15,7 +15,6 @@ package notify
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -25,6 +24,7 @@ import (
 	"github.com/cespare/xxhash/v2"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
 
@@ -251,7 +251,6 @@ type Metrics struct {
 	numTotalFailedNotifications        *prometheus.CounterVec
 	numNotificationRequestsTotal       *prometheus.CounterVec
 	numNotificationRequestsFailedTotal *prometheus.CounterVec
-	numNotificationSuppressedTotal     *prometheus.CounterVec
 	notificationLatencySeconds         *prometheus.HistogramVec
 
 	ff featurecontrol.Flagger
@@ -285,11 +284,6 @@ func NewMetrics(r prometheus.Registerer, ff featurecontrol.Flagger) *Metrics {
 			Name:      "notification_requests_failed_total",
 			Help:      "The total number of failed notification requests.",
 		}, labels),
-		numNotificationSuppressedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: "alertmanager",
-			Name:      "notifications_suppressed_total",
-			Help:      "The total number of notifications suppressed for being outside of active time intervals or within muted time intervals.",
-		}, []string{"reason"}),
 		notificationLatencySeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: "alertmanager",
 			Name:      "notification_latency_seconds",
@@ -302,7 +296,7 @@ func NewMetrics(r prometheus.Registerer, ff featurecontrol.Flagger) *Metrics {
 	r.MustRegister(
 		m.numNotifications, m.numTotalFailedNotifications,
 		m.numNotificationRequestsTotal, m.numNotificationRequestsFailedTotal,
-		m.numNotificationSuppressedTotal, m.notificationLatencySeconds,
+		m.notificationLatencySeconds,
 	)
 
 	return m
@@ -387,10 +381,10 @@ func (pb *PipelineBuilder) New(
 	rs := make(RoutingStage, len(receivers))
 
 	ms := NewGossipSettleStage(peer)
-	is := NewMuteStage(inhibitor, pb.metrics)
-	tas := NewTimeActiveStage(intervener, pb.metrics)
-	tms := NewTimeMuteStage(intervener, pb.metrics)
-	ss := NewMuteStage(silencer, pb.metrics)
+	is := NewMuteStage(inhibitor)
+	tas := NewTimeActiveStage(intervener)
+	tms := NewTimeMuteStage(intervener)
+	ss := NewMuteStage(silencer)
 
 	for name := range receivers {
 		st := createReceiverStage(name, receivers[name], wait, notificationLog, pb.metrics)
@@ -513,22 +507,14 @@ func (n *GossipSettleStage) Exec(ctx context.Context, _ log.Logger, alerts ...*t
 	return ctx, alerts, nil
 }
 
-const (
-	suppressedReasonSilence            = "silence"
-	suppressedReasonInhibition         = "inhibition"
-	suppressedReasonMuteTimeInterval   = "mute_time_interval"
-	suppressedReasonActiveTimeInterval = "active_time_interval"
-)
-
 // MuteStage filters alerts through a Muter.
 type MuteStage struct {
-	muter   types.Muter
-	metrics *Metrics
+	muter types.Muter
 }
 
 // NewMuteStage return a new MuteStage.
-func NewMuteStage(m types.Muter, metrics *Metrics) *MuteStage {
-	return &MuteStage{muter: m, metrics: metrics}
+func NewMuteStage(m types.Muter) *MuteStage {
+	return &MuteStage{muter: m}
 }
 
 // Exec implements the Stage interface.
@@ -549,18 +535,7 @@ func (n *MuteStage) Exec(ctx context.Context, logger log.Logger, alerts ...*type
 	}
 	if len(muted) > 0 {
 		level.Debug(logger).Log("msg", "Notifications will not be sent for muted alerts", "alerts", fmt.Sprintf("%v", muted))
-
-		var reason string
-		switch n.muter.(type) {
-		case *silence.Silencer:
-			reason = suppressedReasonSilence
-		case *inhibit.Inhibitor:
-			reason = suppressedReasonInhibition
-		default:
-		}
-		n.metrics.numNotificationSuppressedTotal.WithLabelValues(reason).Add(float64(len(muted)))
 	}
-
 	return ctx, filtered, nil
 }
 
@@ -711,7 +686,7 @@ func (n *DedupStage) Exec(ctx context.Context, _ log.Logger, alerts ...*types.Al
 	ctx = WithResolvedAlerts(ctx, resolved)
 
 	entries, err := n.nflog.Query(nflog.QGroupKey(gkey), nflog.QReceiver(n.recv))
-	if err != nil && !errors.Is(err, nflog.ErrNotFound) {
+	if err != nil && err != nflog.ErrNotFound {
 		return ctx, nil, err
 	}
 
@@ -721,7 +696,7 @@ func (n *DedupStage) Exec(ctx context.Context, _ log.Logger, alerts ...*types.Al
 	case 1:
 		entry = entries[0]
 	default:
-		return ctx, nil, fmt.Errorf("unexpected entry result size %d", len(entries))
+		return ctx, nil, errors.Errorf("unexpected entry result size %d", len(entries))
 	}
 
 	if n.needsUpdate(entry, firingSet, resolvedSet, repeatInterval) {
@@ -761,8 +736,7 @@ func (r RetryStage) Exec(ctx context.Context, l log.Logger, alerts ...*types.Ale
 
 	failureReason := DefaultReason.String()
 	if err != nil {
-		var e *ErrorWithReason
-		if errors.As(err, &e) {
+		if e, ok := errors.Cause(err).(*ErrorWithReason); ok {
 			failureReason = e.Reason.String()
 		}
 		r.metrics.numTotalFailedNotifications.WithLabelValues(append(r.labelValues, failureReason)...).Inc()
@@ -816,17 +790,9 @@ func (r RetryStage) exec(ctx context.Context, l log.Logger, alerts ...*types.Ale
 		case <-ctx.Done():
 			if iErr == nil {
 				iErr = ctx.Err()
-				if errors.Is(iErr, context.Canceled) {
-					iErr = NewErrorWithReason(ContextCanceledReason, iErr)
-				} else if errors.Is(iErr, context.DeadlineExceeded) {
-					iErr = NewErrorWithReason(ContextDeadlineExceededReason, iErr)
-				}
 			}
 
-			if iErr != nil {
-				return ctx, nil, fmt.Errorf("%s/%s: notify retry canceled after %d attempts: %w", r.groupName, r.integration.String(), i, iErr)
-			}
-			return ctx, nil, nil
+			return ctx, nil, errors.Wrapf(iErr, "%s/%s: notify retry canceled after %d attempts", r.groupName, r.integration.String(), i)
 		default:
 		}
 
@@ -840,17 +806,16 @@ func (r RetryStage) exec(ctx context.Context, l log.Logger, alerts ...*types.Ale
 			if err != nil {
 				r.metrics.numNotificationRequestsFailedTotal.WithLabelValues(r.labelValues...).Inc()
 				if !retry {
-					return ctx, alerts, fmt.Errorf("%s/%s: notify retry canceled due to unrecoverable error after %d attempts: %w", r.groupName, r.integration.String(), i, err)
+					return ctx, alerts, errors.Wrapf(err, "%s/%s: notify retry canceled due to unrecoverable error after %d attempts", r.groupName, r.integration.String(), i)
 				}
-				if ctx.Err() == nil {
-					if iErr == nil || err.Error() != iErr.Error() {
-						// Log the error if the context isn't done and the error isn't the same as before.
-						level.Warn(l).Log("msg", "Notify attempt failed, will retry later", "attempts", i, "err", err)
-					}
-					// Save this error to be able to return the last seen error by an
-					// integration upon context timeout.
-					iErr = err
+				if ctx.Err() == nil && (iErr == nil || err.Error() != iErr.Error()) {
+					// Log the error if the context isn't done and the error isn't the same as before.
+					level.Warn(l).Log("msg", "Notify attempt failed, will retry later", "attempts", i, "err", err)
 				}
+
+				// Save this error to be able to return the last seen error by an
+				// integration upon context timeout.
+				iErr = err
 			} else {
 				lvl := level.Info(l)
 				if i <= 1 {
@@ -863,16 +828,9 @@ func (r RetryStage) exec(ctx context.Context, l log.Logger, alerts ...*types.Ale
 		case <-ctx.Done():
 			if iErr == nil {
 				iErr = ctx.Err()
-				if errors.Is(iErr, context.Canceled) {
-					iErr = NewErrorWithReason(ContextCanceledReason, iErr)
-				} else if errors.Is(iErr, context.DeadlineExceeded) {
-					iErr = NewErrorWithReason(ContextDeadlineExceededReason, iErr)
-				}
 			}
-			if iErr != nil {
-				return ctx, nil, fmt.Errorf("%s/%s: notify retry canceled after %d attempts: %w", r.groupName, r.integration.String(), i, iErr)
-			}
-			return ctx, nil, nil
+
+			return ctx, nil, errors.Wrapf(iErr, "%s/%s: notify retry canceled after %d attempts", r.groupName, r.integration.String(), i)
 		}
 	}
 }
@@ -919,14 +877,13 @@ func (n SetNotifiesStage) Exec(ctx context.Context, l log.Logger, alerts ...*typ
 }
 
 type timeStage struct {
-	muter   types.TimeMuter
-	metrics *Metrics
+	muter types.TimeMuter
 }
 
 type TimeMuteStage timeStage
 
-func NewTimeMuteStage(m types.TimeMuter, metrics *Metrics) *TimeMuteStage {
-	return &TimeMuteStage{m, metrics}
+func NewTimeMuteStage(m types.TimeMuter) *TimeMuteStage {
+	return &TimeMuteStage{m}
 }
 
 // Exec implements the stage interface for TimeMuteStage.
@@ -953,8 +910,7 @@ func (tms TimeMuteStage) Exec(ctx context.Context, l log.Logger, alerts ...*type
 
 	// If the current time is inside a mute time, all alerts are removed from the pipeline.
 	if muted {
-		tms.metrics.numNotificationSuppressedTotal.WithLabelValues(suppressedReasonMuteTimeInterval).Add(float64(len(alerts)))
-		level.Debug(l).Log("msg", "Notifications not sent, route is within mute time", "alerts", len(alerts))
+		level.Debug(l).Log("msg", "Notifications not sent, route is within mute time")
 		return ctx, nil, nil
 	}
 	return ctx, alerts, nil
@@ -962,8 +918,8 @@ func (tms TimeMuteStage) Exec(ctx context.Context, l log.Logger, alerts ...*type
 
 type TimeActiveStage timeStage
 
-func NewTimeActiveStage(m types.TimeMuter, metrics *Metrics) *TimeActiveStage {
-	return &TimeActiveStage{m, metrics}
+func NewTimeActiveStage(m types.TimeMuter) *TimeActiveStage {
+	return &TimeActiveStage{m}
 }
 
 // Exec implements the stage interface for TimeActiveStage.
@@ -991,8 +947,7 @@ func (tas TimeActiveStage) Exec(ctx context.Context, l log.Logger, alerts ...*ty
 
 	// If the current time is not inside an active time, all alerts are removed from the pipeline
 	if !muted {
-		tas.metrics.numNotificationSuppressedTotal.WithLabelValues(suppressedReasonActiveTimeInterval).Add(float64(len(alerts)))
-		level.Debug(l).Log("msg", "Notifications not sent, route is not within active time", "alerts", len(alerts))
+		level.Debug(l).Log("msg", "Notifications not sent, route is not within active time")
 		return ctx, nil, nil
 	}
 

@@ -240,8 +240,8 @@ func (i *isolation) closeAppend(appendID uint64) {
 // The transactionID ring buffer.
 type txRing struct {
 	txIDs     []uint64
-	txIDFirst uint32 // Position of the first id in the ring.
-	txIDCount uint32 // How many ids in the ring.
+	txIDFirst int // Position of the first id in the ring.
+	txIDCount int // How many ids in the ring.
 }
 
 func newTxRing(capacity int) *txRing {
@@ -251,28 +251,21 @@ func newTxRing(capacity int) *txRing {
 }
 
 func (txr *txRing) add(appendID uint64) {
-	if int(txr.txIDCount) == len(txr.txIDs) {
+	if txr.txIDCount == len(txr.txIDs) {
 		// Ring buffer is full, expand by doubling.
-		newLen := txr.txIDCount * 2
-		if newLen == 0 {
-			newLen = 4
-		}
-		newRing := make([]uint64, newLen)
+		newRing := make([]uint64, txr.txIDCount*2)
 		idx := copy(newRing, txr.txIDs[txr.txIDFirst:])
 		copy(newRing[idx:], txr.txIDs[:txr.txIDFirst])
 		txr.txIDs = newRing
 		txr.txIDFirst = 0
 	}
 
-	txr.txIDs[int(txr.txIDFirst+txr.txIDCount)%len(txr.txIDs)] = appendID
+	txr.txIDs[(txr.txIDFirst+txr.txIDCount)%len(txr.txIDs)] = appendID
 	txr.txIDCount++
 }
 
 func (txr *txRing) cleanupAppendIDsBelow(bound uint64) {
-	if len(txr.txIDs) == 0 {
-		return
-	}
-	pos := int(txr.txIDFirst)
+	pos := txr.txIDFirst
 
 	for txr.txIDCount > 0 {
 		if txr.txIDs[pos] < bound {
@@ -288,7 +281,7 @@ func (txr *txRing) cleanupAppendIDsBelow(bound uint64) {
 		}
 	}
 
-	txr.txIDFirst %= uint32(len(txr.txIDs))
+	txr.txIDFirst %= len(txr.txIDs)
 }
 
 func (txr *txRing) iterator() *txRingIterator {
@@ -303,7 +296,7 @@ func (txr *txRing) iterator() *txRingIterator {
 type txRingIterator struct {
 	ids []uint64
 
-	pos uint32
+	pos int
 }
 
 func (it *txRingIterator) At() uint64 {
@@ -312,7 +305,7 @@ func (it *txRingIterator) At() uint64 {
 
 func (it *txRingIterator) Next() {
 	it.pos++
-	if int(it.pos) == len(it.ids) {
+	if it.pos == len(it.ids) {
 		it.pos = 0
 	}
 }

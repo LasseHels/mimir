@@ -17,27 +17,34 @@ import (
 	"github.com/grafana/mimir/pkg/api"
 )
 
-type pushReceiver interface {
-	StartPushRequest(ctx context.Context, requestSize int64) (context.Context, error)
+type ingesterPushReceiver interface {
+	StartPushRequest(requestSize int64) error
+	FinishPushRequest(requestSize int64)
+}
+
+// Interface exposed by Distributor.
+type distributorPushReceiver interface {
+	StartPushRequest(ctx context.Context, httpgrpcRequestSize int64) (context.Context, error)
 	FinishPushRequest(ctx context.Context)
 }
 
 // getPushReceiver function must be constant -- return same value on each call.
 // if getIngester or getDistributor functions are nil, those specific checks are not used.
-func newGrpcInflightMethodLimiter(getIngester, getDistributor func() pushReceiver) *grpcInflightMethodLimiter {
+func newGrpcInflightMethodLimiter(getIngester func() ingesterPushReceiver, getDistributor func() distributorPushReceiver) *grpcInflightMethodLimiter {
 	return &grpcInflightMethodLimiter{getIngester: getIngester, getDistributor: getDistributor}
 }
 
 // grpcInflightMethodLimiter implements gRPC TapHandle and gRPC stats.Handler.
 type grpcInflightMethodLimiter struct {
-	getIngester    func() pushReceiver
-	getDistributor func() pushReceiver
+	getIngester    func() ingesterPushReceiver
+	getDistributor func() distributorPushReceiver
 }
 
 type ctxKey int
 
 const (
-	pushTypeCtxKey ctxKey = 1 // ingester or distributor push
+	pushTypeCtxKey                ctxKey = 1 // ingester or distributor push
+	ingesterPushRequestSizeCtxKey ctxKey = 2
 
 	pushTypeIngester    = 1
 	pushTypeDistributor = 2
@@ -57,11 +64,14 @@ func (g *grpcInflightMethodLimiter) RPCCallStarting(ctx context.Context, methodN
 			return ctx, errNoIngester
 		}
 
-		ctx, err := ing.StartPushRequest(ctx, getMessageSize(md, grpcutil.MetadataMessageSize))
+		reqSize := getMessageSize(md, grpcutil.MetadataMessageSize)
+
+		err := ing.StartPushRequest(reqSize)
 		if err != nil {
 			return ctx, status.Error(codes.Unavailable, err.Error())
 		}
 
+		ctx = context.WithValue(ctx, ingesterPushRequestSizeCtxKey, reqSize)
 		return context.WithValue(ctx, pushTypeCtxKey, pushTypeIngester), nil
 	}
 
@@ -92,7 +102,9 @@ func (g *grpcInflightMethodLimiter) RPCCallFinished(ctx context.Context) {
 	if pt, ok := ctx.Value(pushTypeCtxKey).(int); ok {
 		switch pt {
 		case pushTypeIngester:
-			g.getIngester().FinishPushRequest(ctx)
+			// Using two-outputs here to avoid panics, if value is not of int64 type. reqSize will be 0 in that case, which is fine.
+			reqSize, _ := ctx.Value(ingesterPushRequestSizeCtxKey).(int64)
+			g.getIngester().FinishPushRequest(reqSize)
 
 		case pushTypeDistributor:
 			g.getDistributor().FinishPushRequest(ctx)

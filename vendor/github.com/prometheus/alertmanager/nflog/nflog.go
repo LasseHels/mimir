@@ -212,7 +212,7 @@ func decodeState(r io.Reader) (state, error) {
 			st[stateKey(string(e.Entry.GroupKey), e.Entry.Receiver)] = &e
 			continue
 		}
-		if errors.Is(err, io.EOF) {
+		if err == io.EOF {
 			break
 		}
 		return nil, err

@@ -696,8 +696,8 @@ func (m *mockDistributor) MetricsMetadata(ctx context.Context, req *client.Metri
 	return args.Get(0).([]scrape.MetricMetadata), args.Error(1)
 }
 
-func (m *mockDistributor) LabelNamesAndValues(ctx context.Context, matchers []*labels.Matcher, countMethod cardinality.CountMethod) (*client.LabelNamesAndValuesResponse, error) {
-	args := m.Called(ctx, matchers, countMethod)
+func (m *mockDistributor) LabelNamesAndValues(ctx context.Context, matchers []*labels.Matcher) (*client.LabelNamesAndValuesResponse, error) {
+	args := m.Called(ctx, matchers)
 	return args.Get(0).(*client.LabelNamesAndValuesResponse), args.Error(1)
 }
 

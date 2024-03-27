@@ -18,19 +18,17 @@ package version
 
 import "runtime/debug"
 
-var (
-	computedRevision string
-	computedTags     string
-)
+var computedRevision string
+var computedTags string
 
-func GetRevision() string {
+func getRevision() string {
 	if Revision != "" {
 		return Revision
 	}
 	return computedRevision
 }
 
-func GetTags() string {
+func getTags() string {
 	return computedTags
 }
 

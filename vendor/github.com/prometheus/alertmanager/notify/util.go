@@ -16,7 +16,6 @@ package notify
 import (
 	"context"
 	"crypto/sha256"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,6 +24,7 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/pkg/errors"
 	"github.com/prometheus/common/version"
 
 	"github.com/prometheus/alertmanager/template"
@@ -39,8 +39,8 @@ var UserAgentHeader = fmt.Sprintf("Alertmanager/%s", version.Version)
 
 // RedactURL removes the URL part from an error of *url.Error type.
 func RedactURL(err error) error {
-	var e *url.Error
-	if !errors.As(err, &e) {
+	e, ok := err.(*url.Error)
+	if !ok {
 		return err
 	}
 	e.URL = "<redacted>"
@@ -160,7 +160,7 @@ type Key string
 func ExtractGroupKey(ctx context.Context) (Key, error) {
 	key, ok := GroupKey(ctx)
 	if !ok {
-		return "", fmt.Errorf("group key missing")
+		return "", errors.Errorf("group key missing")
 	}
 	return Key(key), nil
 }
@@ -270,8 +270,6 @@ const (
 	DefaultReason Reason = iota
 	ClientErrorReason
 	ServerErrorReason
-	ContextCanceledReason
-	ContextDeadlineExceededReason
 )
 
 func (s Reason) String() string {
@@ -282,17 +280,13 @@ func (s Reason) String() string {
 		return "clientError"
 	case ServerErrorReason:
 		return "serverError"
-	case ContextCanceledReason:
-		return "contextCanceled"
-	case ContextDeadlineExceededReason:
-		return "contextDeadlineExceeded"
 	default:
 		panic(fmt.Sprintf("unknown Reason: %d", s))
 	}
 }
 
 // possibleFailureReasonCategory is a list of possible failure reason.
-var possibleFailureReasonCategory = []string{DefaultReason.String(), ClientErrorReason.String(), ServerErrorReason.String(), ContextCanceledReason.String(), ContextDeadlineExceededReason.String()}
+var possibleFailureReasonCategory = []string{DefaultReason.String(), ClientErrorReason.String(), ServerErrorReason.String()}
 
 // GetFailureReasonFromStatusCode returns the reason for the failure based on the status code provided.
 func GetFailureReasonFromStatusCode(statusCode int) Reason {

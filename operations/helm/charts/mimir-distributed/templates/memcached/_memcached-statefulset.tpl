@@ -42,23 +42,15 @@ spec:
       {{- end }}
       securityContext:
         {{- include "mimir.lib.podSecurityContext" (dict "ctx" $.ctx "component" "memcached") | nindent 8 }}
-      {{- with .initContainers }}
       initContainers:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .nodeSelector }}
+        {{- toYaml .initContainers | nindent 8 }}
       nodeSelector:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .affinity }}
+        {{- toYaml .nodeSelector | nindent 8 }}
       affinity:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- toYaml .affinity | nindent 8 }}
       {{- include "mimir.lib.topologySpreadConstraints" $ | nindent 6 }}
-      {{- with .tolerations }}
       tolerations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- toYaml .tolerations | nindent 8 }}
       terminationGracePeriodSeconds: {{ .terminationGracePeriodSeconds }}
       {{- if $.ctx.Values.image.pullSecrets }}
       imagePullSecrets:
@@ -98,7 +90,7 @@ spec:
             - -m {{ .allocatedMemory }}
             - --extended=modern,track_sizes{{ with .extraExtendedOptions }},{{ . }}{{ end }}
             - -I {{ .maxItemMemory }}m
-            - -c {{ .connectionLimit }}
+            - -c 16384
             - -v
             - -u {{ .port }}
             {{- range $key, $value := .extraArgs }}
@@ -146,4 +138,3 @@ spec:
 {{- end -}}
 {{- end -}}
 {{- end -}}
-

@@ -8,15 +8,15 @@ package tsdb
 import (
 	"github.com/oklog/ulid"
 
-	"github.com/grafana/mimir/pkg/mimirpb"
+	"github.com/grafana/mimir/pkg/ingester/client"
 )
 
 // HashBlockID returns a 32-bit hash of the block ID useful for
 // ring-based sharding.
 func HashBlockID(id ulid.ULID) uint32 {
-	h := mimirpb.HashNew32()
+	h := client.HashNew32()
 	for _, b := range id {
-		h = mimirpb.HashAddByte32(h, b)
+		h = client.HashAddByte32(h, b)
 	}
 	return h
 }

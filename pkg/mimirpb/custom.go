@@ -58,20 +58,12 @@ func (h *Histogram) ReduceResolution() (int, error) {
 	return h.reduceIntResolution()
 }
 
-const (
-	// MinimumHistogramSchema is the minimum schema for a histogram.
-	// Currently, it is -4, hardcoded and not exported from either
-	// Prometheus or client_golang, so we define it here.
-	MinimumHistogramSchema = -4
-
-	// MaximumHistogramSchema is the minimum schema for a histogram.
-	// Currently, it is 8, hardcoded and not exported from either
-	// Prometheus or client_golang, so we define it here.
-	MaximumHistogramSchema = 8
-)
+// The minimum schema for a histogram is -4. Currently this is hardcoded and
+// not exported from Prometheus or client_golang, so we define it here.
+const minimumHistogramSchema = -4
 
 func (h *Histogram) reduceFloatResolution() (int, error) {
-	if h.Schema == MinimumHistogramSchema {
+	if h.Schema == minimumHistogramSchema {
 		return 0, fmt.Errorf("cannot reduce resolution of histogram with schema %d", h.Schema)
 	}
 	h.PositiveSpans, h.PositiveCounts = reduceResolution(h.PositiveSpans, h.PositiveCounts, h.Schema, h.Schema-1, false)
@@ -81,7 +73,7 @@ func (h *Histogram) reduceFloatResolution() (int, error) {
 }
 
 func (h *Histogram) reduceIntResolution() (int, error) {
-	if h.Schema == MinimumHistogramSchema {
+	if h.Schema == minimumHistogramSchema {
 		return 0, fmt.Errorf("cannot reduce resolution of histogram with schema %d", h.Schema)
 	}
 	h.PositiveSpans, h.PositiveDeltas = reduceResolution(h.PositiveSpans, h.PositiveDeltas, h.Schema, h.Schema-1, true)

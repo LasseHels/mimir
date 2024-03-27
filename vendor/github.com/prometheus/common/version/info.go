@@ -35,8 +35,6 @@ var (
 	GoArch    = runtime.GOARCH
 )
 
-// Deprecated: Use github.com/prometheus/client_golang/prometheus/collectors/version.NewCollector instead.
-//
 // NewCollector returns a collector that exports metrics about current version
 // information.
 func NewCollector(program string) prometheus.Collector {
@@ -50,12 +48,12 @@ func NewCollector(program string) prometheus.Collector {
 			),
 			ConstLabels: prometheus.Labels{
 				"version":   Version,
-				"revision":  GetRevision(),
+				"revision":  getRevision(),
 				"branch":    Branch,
 				"goversion": GoVersion,
 				"goos":      GoOS,
 				"goarch":    GoArch,
-				"tags":      GetTags(),
+				"tags":      getTags(),
 			},
 		},
 		func() float64 { return 1 },
@@ -77,13 +75,13 @@ func Print(program string) string {
 	m := map[string]string{
 		"program":   program,
 		"version":   Version,
-		"revision":  GetRevision(),
+		"revision":  getRevision(),
 		"branch":    Branch,
 		"buildUser": BuildUser,
 		"buildDate": BuildDate,
 		"goVersion": GoVersion,
 		"platform":  GoOS + "/" + GoArch,
-		"tags":      GetTags(),
+		"tags":      getTags(),
 	}
 	t := template.Must(template.New("version").Parse(versionInfoTmpl))
 
@@ -96,10 +94,10 @@ func Print(program string) string {
 
 // Info returns version, branch and revision information.
 func Info() string {
-	return fmt.Sprintf("(version=%s, branch=%s, revision=%s)", Version, Branch, GetRevision())
+	return fmt.Sprintf("(version=%s, branch=%s, revision=%s)", Version, Branch, getRevision())
 }
 
 // BuildContext returns goVersion, platform, buildUser and buildDate information.
 func BuildContext() string {
-	return fmt.Sprintf("(go=%s, platform=%s, user=%s, date=%s, tags=%s)", GoVersion, GoOS+"/"+GoArch, BuildUser, BuildDate, GetTags())
+	return fmt.Sprintf("(go=%s, platform=%s, user=%s, date=%s, tags=%s)", GoVersion, GoOS+"/"+GoArch, BuildUser, BuildDate, getTags())
 }

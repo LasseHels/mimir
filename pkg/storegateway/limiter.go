@@ -14,7 +14,6 @@ import (
 	"go.uber.org/atomic"
 
 	"github.com/grafana/mimir/pkg/util/limiter"
-	"github.com/grafana/mimir/pkg/util/validation"
 )
 
 type ChunksLimiter interface {
@@ -40,9 +39,9 @@ type SeriesLimiterFactory func(failedCounter prometheus.Counter) SeriesLimiter
 
 // Limiter is a simple mechanism for checking if something has passed a certain threshold.
 type Limiter struct {
-	limit         uint64
-	reserved      atomic.Uint64
-	limitErrorMsg string
+	limit              uint64
+	reserved           atomic.Uint64
+	errorMessageFormat string
 
 	// Counter metric which we will increase if limit is exceeded.
 	failedCounter prometheus.Counter
@@ -50,12 +49,8 @@ type Limiter struct {
 }
 
 // NewLimiter returns a new limiter with a specified limit. 0 disables the limit.
-func NewLimiter(limit uint64, ctr prometheus.Counter, limitErrorFunc func(uint64) validation.LimitError) *Limiter {
-	var limitErrorMsg string
-	if limitErrorFunc != nil {
-		limitErrorMsg = limitErrorFunc(limit).Error()
-	}
-	return &Limiter{limit: limit, failedCounter: ctr, limitErrorMsg: limitErrorMsg}
+func NewLimiter(limit uint64, ctr prometheus.Counter, errorMessageFormat string) *Limiter {
+	return &Limiter{limit: limit, failedCounter: ctr, errorMessageFormat: errorMessageFormat}
 }
 
 // Reserve implements ChunksLimiter.
@@ -67,7 +62,7 @@ func (l *Limiter) Reserve(num uint64) error {
 		// We need to protect from the counter being incremented twice due to concurrency
 		// while calling Reserve().
 		l.failedOnce.Do(l.failedCounter.Inc)
-		return httpgrpc.Errorf(http.StatusUnprocessableEntity, l.limitErrorMsg)
+		return httpgrpc.Errorf(http.StatusUnprocessableEntity, l.errorMessageFormat, l.limit)
 	}
 	return nil
 }
@@ -75,13 +70,13 @@ func (l *Limiter) Reserve(num uint64) error {
 // NewChunksLimiterFactory makes a new ChunksLimiterFactory with a dynamic limit.
 func NewChunksLimiterFactory(limitsExtractor func() uint64) ChunksLimiterFactory {
 	return func(failedCounter prometheus.Counter) ChunksLimiter {
-		return NewLimiter(limitsExtractor(), failedCounter, limiter.NewMaxChunksPerQueryLimitError)
+		return NewLimiter(limitsExtractor(), failedCounter, limiter.MaxChunksPerQueryLimitMsgFormat)
 	}
 }
 
 // NewSeriesLimiterFactory makes a new NewSeriesLimiterFactory with a dynamic limit.
 func NewSeriesLimiterFactory(limitsExtractor func() uint64) SeriesLimiterFactory {
 	return func(failedCounter prometheus.Counter) SeriesLimiter {
-		return NewLimiter(limitsExtractor(), failedCounter, limiter.NewMaxSeriesHitLimitError)
+		return NewLimiter(limitsExtractor(), failedCounter, limiter.MaxSeriesHitMsgFormat)
 	}
 }

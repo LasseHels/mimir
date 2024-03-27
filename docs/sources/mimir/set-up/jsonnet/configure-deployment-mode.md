@@ -13,9 +13,8 @@ Grafana Mimir supports multiple [deployment modes]({{< relref "../../references/
 
 ## Use Read-Write deployment mode
 
-{{< admonition type="warning" >}}
-Read-Write deployment mode is experimental.
-{{< /admonition >}}
+> **Warning:**
+> Read-Write deployment mode is currently considered experimental.
 
 ### Requirements
 

@@ -14,7 +14,6 @@ import (
 	"github.com/grafana/mimir/pkg/ingester/activeseries"
 	"github.com/grafana/mimir/pkg/ingester/client"
 	"github.com/grafana/mimir/pkg/mimirpb"
-	"github.com/grafana/mimir/pkg/storage/sharding"
 	"github.com/grafana/mimir/pkg/util/spanlogger"
 )
 
@@ -24,7 +23,7 @@ const activeSeriesMaxSizeBytes = 1 * 1024 * 1024
 // series that match the given matchers.
 func (i *Ingester) ActiveSeries(request *client.ActiveSeriesRequest, stream client.Ingester_ActiveSeriesServer) (err error) {
 	defer func() { err = i.mapReadErrorToErrorWithStatus(err) }()
-	if err := i.checkAvailableForRead(); err != nil {
+	if err := i.checkAvailable(); err != nil {
 		return err
 	}
 	if err := i.checkReadOverloaded(); err != nil {
@@ -42,12 +41,6 @@ func (i *Ingester) ActiveSeries(request *client.ActiveSeriesRequest, stream clie
 	matchers, err := client.FromLabelMatchers(request.GetMatchers())
 	if err != nil {
 		return fmt.Errorf("error parsing label matchers: %w", err)
-	}
-
-	// Enforce read consistency before getting TSDB (covers the case the tenant's data has not been ingested
-	// in this ingester yet, but there's some to ingest in the backlog).
-	if err := i.enforceReadConsistency(ctx, userID); err != nil {
-		return err
 	}
 
 	db := i.getTSDB(userID)
@@ -100,21 +93,10 @@ func listActiveSeries(ctx context.Context, db *userTSDB, matchers []*labels.Matc
 		return nil, fmt.Errorf("active series tracker is not initialized")
 	}
 
-	shard, matchers, err := sharding.RemoveShardFromMatchers(matchers)
-	if err != nil {
-		return nil, fmt.Errorf("error removing shard matcher: %w", err)
-	}
-
 	postings, err := tsdb.PostingsForMatchers(ctx, idx, matchers...)
 	if err != nil {
 		return nil, fmt.Errorf("error getting postings: %w", err)
 	}
 
-	postings = activeseries.NewPostings(db.activeSeries, postings)
-
-	if shard != nil {
-		postings = idx.ShardedPostings(postings, shard.ShardIndex, shard.ShardCount)
-	}
-
-	return NewSeries(postings, idx), nil
+	return NewSeries(activeseries.NewPostings(db.activeSeries, postings), idx), nil
 }

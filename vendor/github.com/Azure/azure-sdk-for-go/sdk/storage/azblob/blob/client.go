@@ -464,7 +464,7 @@ func (b *Client) downloadFile(ctx context.Context, writer io.Writer, o downloadO
 
 	buffers := shared.NewMMBPool(int(o.Concurrency), o.BlockSize)
 	defer buffers.Free()
-	acquireBuffer := func() ([]byte, error) {
+	aquireBuffer := func() ([]byte, error) {
 		select {
 		case b := <-buffers.Acquire():
 			// got a buffer
@@ -489,23 +489,21 @@ func (b *Client) downloadFile(ctx context.Context, writer io.Writer, o downloadO
 	/*
 	 * We have created as many channels as the number of chunks we have.
 	 * Each downloaded block will be sent to the channel matching its
-	 * sequence number, i.e. 0th block is sent to 0th channel, 1st block
+	 * sequece number, i.e. 0th block is sent to 0th channel, 1st block
 	 * to 1st channel and likewise. The blocks are then read and written
 	 * to the file serially by below goroutine. Do note that the blocks
-	 * are still downloaded parallelly from n/w, only serialized
+	 * blocks are still downloaded parallelly from n/w, only serailized
 	 * and written to file here.
 	 */
 	writerError := make(chan error)
-	writeSize := int64(0)
 	go func(ch chan error) {
 		for _, block := range blocks {
 			select {
 			case <-ctx.Done():
 				return
 			case block := <-block:
-				n, err := writer.Write(block)
-				writeSize += int64(n)
-				buffers.Release(block[:cap(block)])
+				_, err := writer.Write(block)
+				buffers.Release(block)
 				if err != nil {
 					ch <- err
 					return
@@ -523,7 +521,7 @@ func (b *Client) downloadFile(ctx context.Context, writer io.Writer, o downloadO
 		NumChunks:     numChunks,
 		Concurrency:   o.Concurrency,
 		Operation: func(ctx context.Context, chunkStart int64, count int64) error {
-			buff, err := acquireBuffer()
+			buff, err := aquireBuffer()
 			if err != nil {
 				return err
 			}
@@ -540,8 +538,8 @@ func (b *Client) downloadFile(ctx context.Context, writer io.Writer, o downloadO
 				return err
 			}
 
-			blockIndex := chunkStart / o.BlockSize
-			blocks[blockIndex] <- buff[:count]
+			blockIndex := (chunkStart / o.BlockSize)
+			blocks[blockIndex] <- buff
 			return nil
 		},
 	})
@@ -553,7 +551,7 @@ func (b *Client) downloadFile(ctx context.Context, writer io.Writer, o downloadO
 	if err = <-writerError; err != nil {
 		return 0, err
 	}
-	return writeSize, nil
+	return count, nil
 }
 
 // DownloadStream reads a range of bytes from a blob. The response also includes the blob's properties and metadata.

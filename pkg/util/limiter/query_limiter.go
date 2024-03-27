@@ -7,12 +7,14 @@ package limiter
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"go.uber.org/atomic"
 
 	"github.com/grafana/mimir/pkg/mimirpb"
 	"github.com/grafana/mimir/pkg/querier/stats"
+	"github.com/grafana/mimir/pkg/util/globalerror"
 	"github.com/grafana/mimir/pkg/util/validation"
 )
 
@@ -23,7 +25,27 @@ const (
 )
 
 var (
-	ctxKey = &queryLimiterCtxKey{}
+	ctxKey                = &queryLimiterCtxKey{}
+	MaxSeriesHitMsgFormat = globalerror.MaxSeriesPerQuery.MessageWithStrategyAndPerTenantLimitConfig(
+		"the query exceeded the maximum number of series (limit: %d series)",
+		cardinalityStrategy,
+		validation.MaxSeriesPerQueryFlag,
+	)
+	MaxChunkBytesHitMsgFormat = globalerror.MaxChunkBytesPerQuery.MessageWithStrategyAndPerTenantLimitConfig(
+		"the query exceeded the aggregated chunks size limit (limit: %d bytes)",
+		cardinalityStrategy,
+		validation.MaxChunkBytesPerQueryFlag,
+	)
+	MaxChunksPerQueryLimitMsgFormat = globalerror.MaxChunksPerQuery.MessageWithStrategyAndPerTenantLimitConfig(
+		"the query exceeded the maximum number of chunks (limit: %d chunks)",
+		cardinalityStrategy,
+		validation.MaxChunksPerQueryFlag,
+	)
+	MaxEstimatedChunksPerQueryLimitMsgFormat = globalerror.MaxEstimatedChunksPerQuery.MessageWithStrategyAndPerTenantLimitConfig(
+		"the estimated number of chunks for the query exceeded the maximum allowed (limit: %d chunks)",
+		cardinalityStrategy,
+		validation.MaxEstimatedChunksPerQueryMultiplierFlag,
+	)
 )
 
 type QueryLimiter struct {
@@ -74,7 +96,7 @@ func QueryLimiterFromContextWithFallback(ctx context.Context) *QueryLimiter {
 }
 
 // AddSeries adds the input series and returns an error if the limit is reached.
-func (ql *QueryLimiter) AddSeries(seriesLabels []mimirpb.LabelAdapter) validation.LimitError {
+func (ql *QueryLimiter) AddSeries(seriesLabels []mimirpb.LabelAdapter) error {
 	// If the max series is unlimited just return without managing map
 	if ql.maxSeriesPerQuery == 0 {
 		return nil
@@ -94,7 +116,7 @@ func (ql *QueryLimiter) AddSeries(seriesLabels []mimirpb.LabelAdapter) validatio
 			ql.queryMetrics.QueriesRejectedTotal.WithLabelValues(stats.RejectReasonMaxSeries).Inc()
 		}
 
-		return NewMaxSeriesHitLimitError(uint64(ql.maxSeriesPerQuery))
+		return validation.LimitError(fmt.Sprintf(MaxSeriesHitMsgFormat, ql.maxSeriesPerQuery))
 	}
 	return nil
 }
@@ -107,7 +129,7 @@ func (ql *QueryLimiter) uniqueSeriesCount() int {
 }
 
 // AddChunkBytes adds the input chunk size in bytes and returns an error if the limit is reached.
-func (ql *QueryLimiter) AddChunkBytes(chunkSizeInBytes int) validation.LimitError {
+func (ql *QueryLimiter) AddChunkBytes(chunkSizeInBytes int) error {
 	if ql.maxChunkBytesPerQuery == 0 {
 		return nil
 	}
@@ -120,12 +142,12 @@ func (ql *QueryLimiter) AddChunkBytes(chunkSizeInBytes int) validation.LimitErro
 			ql.queryMetrics.QueriesRejectedTotal.WithLabelValues(stats.RejectReasonMaxChunkBytes).Inc()
 		}
 
-		return NewMaxChunkBytesHitLimitError(uint64(ql.maxChunkBytesPerQuery))
+		return validation.LimitError(fmt.Sprintf(MaxChunkBytesHitMsgFormat, ql.maxChunkBytesPerQuery))
 	}
 	return nil
 }
 
-func (ql *QueryLimiter) AddChunks(count int) validation.LimitError {
+func (ql *QueryLimiter) AddChunks(count int) error {
 	if ql.maxChunksPerQuery == 0 {
 		return nil
 	}
@@ -138,12 +160,12 @@ func (ql *QueryLimiter) AddChunks(count int) validation.LimitError {
 			ql.queryMetrics.QueriesRejectedTotal.WithLabelValues(stats.RejectReasonMaxChunks).Inc()
 		}
 
-		return NewMaxChunksPerQueryLimitError(uint64(ql.maxChunksPerQuery))
+		return validation.LimitError(fmt.Sprintf(MaxChunksPerQueryLimitMsgFormat, ql.maxChunksPerQuery))
 	}
 	return nil
 }
 
-func (ql *QueryLimiter) AddEstimatedChunks(count int) validation.LimitError {
+func (ql *QueryLimiter) AddEstimatedChunks(count int) error {
 	if ql.maxEstimatedChunksPerQuery == 0 {
 		return nil
 	}
@@ -156,7 +178,7 @@ func (ql *QueryLimiter) AddEstimatedChunks(count int) validation.LimitError {
 			ql.queryMetrics.QueriesRejectedTotal.WithLabelValues(stats.RejectReasonMaxEstimatedChunks).Inc()
 		}
 
-		return NewMaxEstimatedChunksPerQueryLimitError(uint64(ql.maxEstimatedChunksPerQuery))
+		return validation.LimitError(fmt.Sprintf(MaxEstimatedChunksPerQueryLimitMsgFormat, ql.maxEstimatedChunksPerQuery))
 	}
 	return nil
 }

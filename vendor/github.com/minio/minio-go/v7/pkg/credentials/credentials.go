@@ -30,19 +30,16 @@ const (
 	defaultExpiryWindow = 0.8
 )
 
-// A Value is the S3 credentials value for individual credential fields.
+// A Value is the AWS credentials value for individual credential fields.
 type Value struct {
-	// S3 Access key ID
+	// AWS Access key ID
 	AccessKeyID string
 
-	// S3 Secret Access Key
+	// AWS Secret Access Key
 	SecretAccessKey string
 
-	// S3 Session Token
+	// AWS Session Token
 	SessionToken string
-
-	// Expiration of this credentials - null means no expiration associated
-	Expiration time.Time
 
 	// Signature Type.
 	SignerType SignatureType

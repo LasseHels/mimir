@@ -501,28 +501,30 @@ func packTxtString(s string, msg []byte, offset int) (int, error) {
 	return offset, nil
 }
 
-func packOctetString(s string, msg []byte, offset int) (int, error) {
-	if offset >= len(msg) || len(s) > 256*4+1 {
+func packOctetString(s string, msg []byte, offset int, tmp []byte) (int, error) {
+	if offset >= len(msg) || len(s) > len(tmp) {
 		return offset, ErrBuf
 	}
-	for i := 0; i < len(s); i++ {
+	bs := tmp[:len(s)]
+	copy(bs, s)
+	for i := 0; i < len(bs); i++ {
 		if len(msg) <= offset {
 			return offset, ErrBuf
 		}
-		if s[i] == '\\' {
+		if bs[i] == '\\' {
 			i++
-			if i == len(s) {
+			if i == len(bs) {
 				break
 			}
 			// check for \DDD
-			if isDDD(s[i:]) {
-				msg[offset] = dddToByte(s[i:])
+			if isDDD(bs[i:]) {
+				msg[offset] = dddToByte(bs[i:])
 				i += 2
 			} else {
-				msg[offset] = s[i]
+				msg[offset] = bs[i]
 			}
 		} else {
-			msg[offset] = s[i]
+			msg[offset] = bs[i]
 		}
 		offset++
 	}

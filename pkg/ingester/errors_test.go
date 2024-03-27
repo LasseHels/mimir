@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/gogo/status"
-	"github.com/grafana/dskit/grpcutil"
 	"github.com/grafana/dskit/httpgrpc"
 	"github.com/grafana/dskit/middleware"
 	"github.com/grafana/dskit/services"
@@ -108,14 +107,16 @@ func TestNewPerUserMetadataLimitError(t *testing.T) {
 
 func TestNewPerMetricSeriesLimitError(t *testing.T) {
 	limit := 100
-	labels := []mimirpb.LabelAdapter{{Name: labels.MetricName, Value: "testmetric"}, {Name: "foo", Value: "biz"}}
+	labels := mimirpb.FromLabelAdaptersToLabels(
+		[]mimirpb.LabelAdapter{{Name: labels.MetricName, Value: "testmetric"}, {Name: "foo", Value: "biz"}},
+	)
 	err := newPerMetricSeriesLimitReachedError(limit, labels)
 	expectedErrMsg := fmt.Sprintf("%s This is for series %s",
 		globalerror.MaxSeriesPerMetric.MessageWithPerTenantLimitConfig(
 			fmt.Sprintf("per-metric series limit of %d exceeded", limit),
 			validation.MaxSeriesPerMetricFlag,
 		),
-		mimirpb.FromLabelAdaptersToString(labels),
+		labels.String(),
 	)
 	require.Equal(t, expectedErrMsg, err.Error())
 	checkIngesterError(t, err, mimirpb.BAD_DATA, true)
@@ -128,14 +129,16 @@ func TestNewPerMetricSeriesLimitError(t *testing.T) {
 
 func TestNewPerMetricMetadataLimitError(t *testing.T) {
 	limit := 100
-	family := "testmetric"
-	err := newPerMetricMetadataLimitReachedError(limit, family)
-	expectedErrMsg := fmt.Sprintf("%s This is for metric %s",
+	labels := mimirpb.FromLabelAdaptersToLabels(
+		[]mimirpb.LabelAdapter{{Name: labels.MetricName, Value: "testmetric"}, {Name: "foo", Value: "biz"}},
+	)
+	err := newPerMetricMetadataLimitReachedError(limit, labels)
+	expectedErrMsg := fmt.Sprintf("%s This is for series %s",
 		globalerror.MaxMetadataPerMetric.MessageWithPerTenantLimitConfig(
 			fmt.Sprintf("per-metric metadata limit of %d exceeded", limit),
 			validation.MaxMetadataPerMetricFlag,
 		),
-		family,
+		labels.String(),
 	)
 	require.Equal(t, expectedErrMsg, err.Error())
 	checkIngesterError(t, err, mimirpb.BAD_DATA, true)
@@ -154,23 +157,23 @@ func TestNewSampleError(t *testing.T) {
 	}{
 		"newSampleTimestampTooOldError": {
 			err:         newSampleTimestampTooOldError(timestamp, seriesLabels),
-			expectedMsg: `the sample has been rejected because its timestamp is too old (err-mimir-sample-timestamp-too-old). The affected sample has timestamp 1970-01-19T05:30:43.969Z and is from series test`,
+			expectedMsg: `the sample has been rejected because its timestamp is too old (err-mimir-sample-timestamp-too-old). The affected sample has timestamp 1970-01-19T05:30:43.969Z and is from series {__name__="test"}`,
 		},
 		"newSampleTimestampTooOldOOOEnabledError": {
 			err:         newSampleTimestampTooOldOOOEnabledError(timestamp, seriesLabels, 2*time.Hour),
-			expectedMsg: `the sample has been rejected because another sample with a more recent timestamp has already been ingested and this sample is beyond the out-of-order time window of 2h (err-mimir-sample-timestamp-too-old). The affected sample has timestamp 1970-01-19T05:30:43.969Z and is from series test`,
+			expectedMsg: `the sample has been rejected because another sample with a more recent timestamp has already been ingested and this sample is beyond the out-of-order time window of 2h (err-mimir-sample-timestamp-too-old). The affected sample has timestamp 1970-01-19T05:30:43.969Z and is from series {__name__="test"}`,
 		},
 		"newSampleTimestampTooFarInFutureError": {
 			err:         newSampleTimestampTooFarInFutureError(timestamp, seriesLabels),
-			expectedMsg: `received a sample whose timestamp is too far in the future (err-mimir-too-far-in-future). The affected sample has timestamp 1970-01-19T05:30:43.969Z and is from series test`,
+			expectedMsg: `received a sample whose timestamp is too far in the future (err-mimir-too-far-in-future). The affected sample has timestamp 1970-01-19T05:30:43.969Z and is from series {__name__="test"}`,
 		},
 		"newSampleOutOfOrderError": {
 			err:         newSampleOutOfOrderError(timestamp, seriesLabels),
-			expectedMsg: `the sample has been rejected because another sample with a more recent timestamp has already been ingested and out-of-order samples are not allowed (err-mimir-sample-out-of-order). The affected sample has timestamp 1970-01-19T05:30:43.969Z and is from series test`,
+			expectedMsg: `the sample has been rejected because another sample with a more recent timestamp has already been ingested and out-of-order samples are not allowed (err-mimir-sample-out-of-order). The affected sample has timestamp 1970-01-19T05:30:43.969Z and is from series {__name__="test"}`,
 		},
 		"newSampleDuplicateTimestampError": {
 			err:         newSampleDuplicateTimestampError(timestamp, seriesLabels),
-			expectedMsg: `the sample has been rejected because another sample with the same timestamp, but a different value, has already been ingested (err-mimir-sample-duplicate-timestamp). The affected sample has timestamp 1970-01-19T05:30:43.969Z and is from series test`,
+			expectedMsg: `the sample has been rejected because another sample with the same timestamp, but a different value, has already been ingested (err-mimir-sample-duplicate-timestamp). The affected sample has timestamp 1970-01-19T05:30:43.969Z and is from series {__name__="test"}`,
 		},
 	}
 
@@ -197,11 +200,11 @@ func TestNewExemplarError(t *testing.T) {
 	}{
 		"newExemplarMissingSeriesError": {
 			err:         newExemplarMissingSeriesError(timestamp, seriesLabels, exemplarsLabels),
-			expectedMsg: `the exemplar has been rejected because the related series has not been ingested yet (err-mimir-exemplar-series-missing). The affected exemplar is {traceID="123"} with timestamp 1970-01-19T05:30:43.969Z for series test`,
+			expectedMsg: `the exemplar has been rejected because the related series has not been ingested yet (err-mimir-exemplar-series-missing). The affected exemplar is {traceID="123"} with timestamp 1970-01-19T05:30:43.969Z for series {__name__="test"}`,
 		},
 		"newExemplarTimestampTooFarInFutureError": {
 			err:         newExemplarTimestampTooFarInFutureError(timestamp, seriesLabels, exemplarsLabels),
-			expectedMsg: `received an exemplar whose timestamp is too far in the future (err-mimir-exemplar-too-far-in-future). The affected exemplar is {traceID="123"} with timestamp 1970-01-19T05:30:43.969Z for series test`,
+			expectedMsg: `received an exemplar whose timestamp is too far in the future (err-mimir-exemplar-too-far-in-future). The affected exemplar is {traceID="123"} with timestamp 1970-01-19T05:30:43.969Z for series {__name__="test"}`,
 		},
 	}
 
@@ -224,7 +227,7 @@ func TestNewTSDBIngestExemplarErr(t *testing.T) {
 	exemplarsLabels := []mimirpb.LabelAdapter{{Name: "traceID", Value: "123"}}
 	anotherErr := errors.New("another error")
 	err := newTSDBIngestExemplarErr(anotherErr, timestamp, seriesLabels, exemplarsLabels)
-	expectedErrMsg := fmt.Sprintf("err: %v. timestamp=1970-01-19T05:30:43.969Z, series=test, exemplar={traceID=\"123\"}", anotherErr)
+	expectedErrMsg := fmt.Sprintf("err: %v. timestamp=1970-01-19T05:30:43.969Z, series={__name__=\"test\"}, exemplar={traceID=\"123\"}", anotherErr)
 	require.Equal(t, expectedErrMsg, err.Error())
 	checkIngesterError(t, err, mimirpb.BAD_DATA, true)
 
@@ -235,12 +238,12 @@ func TestNewTSDBIngestExemplarErr(t *testing.T) {
 }
 
 func TestTooBusyError(t *testing.T) {
-	require.Error(t, errTooBusy)
-	require.Equal(t, "ingester is currently too busy to process queries, try again later", errTooBusy.Error())
-	checkIngesterError(t, errTooBusy, mimirpb.TOO_BUSY, false)
+	require.Error(t, tooBusyError)
+	require.Equal(t, "the ingester is currently too busy to process queries, try again later", tooBusyError.Error())
+	checkIngesterError(t, tooBusyError, mimirpb.TOO_BUSY, false)
 
-	wrappedErr := wrapOrAnnotateWithUser(errTooBusy, userID)
-	require.ErrorIs(t, wrappedErr, errTooBusy)
+	wrappedErr := wrapOrAnnotateWithUser(tooBusyError, userID)
+	require.ErrorIs(t, wrappedErr, tooBusyError)
 	var anotherIngesterTooBusyErr ingesterTooBusyError
 	require.ErrorAs(t, wrappedErr, &anotherIngesterTooBusyErr)
 	checkIngesterError(t, wrappedErr, mimirpb.TOO_BUSY, false)
@@ -285,22 +288,13 @@ func TestErrorWithStatus(t *testing.T) {
 			require.Errorf(t, errWithStatus, data.expectedErrorMessage)
 
 			// Ensure gogo's status.FromError recognizes errWithStatus.
-			//lint:ignore faillint We want to explicitly assert on status.FromError()
 			stat, ok := status.FromError(errWithStatus)
 			require.True(t, ok)
 			require.Equal(t, codes.Unimplemented, stat.Code())
 			require.Equal(t, stat.Message(), data.expectedErrorMessage)
 			checkErrorWithStatusDetails(t, stat.Details(), data.expectedErrorDetails)
 
-			// Ensure dskit's grpcutil.ErrorToStatus recognizes errWithHTTPStatus.
-			stat, ok = grpcutil.ErrorToStatus(errWithStatus)
-			require.True(t, ok)
-			require.Equal(t, codes.Unimplemented, stat.Code())
-			require.Equal(t, stat.Message(), data.expectedErrorMessage)
-			checkErrorWithStatusDetails(t, stat.Details(), data.expectedErrorDetails)
-
 			// Ensure grpc's status.FromError recognizes errWithStatus.
-			//lint:ignore faillint We want to explicitly assert on status.FromError()
 			st, ok := grpcstatus.FromError(errWithStatus)
 			require.True(t, ok)
 			require.Equal(t, codes.Unimplemented, st.Code())
@@ -325,23 +319,14 @@ func TestErrorWithHTTPStatus(t *testing.T) {
 	err := newSampleTimestampTooOldError(timestamp, metricLabelAdapters)
 	errWithHTTPStatus := newErrorWithHTTPStatus(err, http.StatusBadRequest)
 	require.Error(t, errWithHTTPStatus)
-
 	// Ensure gogo's status.FromError recognizes errWithHTTPStatus.
-	//lint:ignore faillint We want to explicitly assert on status.FromError()
 	stat, ok := status.FromError(errWithHTTPStatus)
 	require.True(t, ok)
 	require.Equal(t, http.StatusBadRequest, int(stat.Code()))
 	require.Errorf(t, err, stat.Message())
 	require.NotEmpty(t, stat.Details())
 
-	// Ensure dskit's grpcutil.ErrorToStatus recognizes errWithHTTPStatus.
-	stat, ok = grpcutil.ErrorToStatus(errWithHTTPStatus)
-	require.True(t, ok)
-	require.Equal(t, http.StatusBadRequest, int(stat.Code()))
-	require.Errorf(t, err, stat.Message())
-
 	// Ensure grpc's status.FromError recognizes errWithHTTPStatus.
-	//lint:ignore faillint We want to explicitly assert on status.FromError()
 	st, ok := grpcstatus.FromError(errWithHTTPStatus)
 	require.True(t, ok)
 	require.Equal(t, http.StatusBadRequest, int(st.Code()))
@@ -377,8 +362,8 @@ func TestWrapOrAnnotateWithUser(t *testing.T) {
 func TestMapPushErrorToErrorWithStatus(t *testing.T) {
 	const originalMsg = "this is an error"
 	originalErr := errors.New(originalMsg)
-	family := "testmetric"
-	labelAdapters := []mimirpb.LabelAdapter{{Name: labels.MetricName, Value: family}, {Name: "foo", Value: "biz"}}
+	labelAdapters := []mimirpb.LabelAdapter{{Name: labels.MetricName, Value: "testmetric"}, {Name: "foo", Value: "biz"}}
+	labels := mimirpb.FromLabelAdaptersToLabels(labelAdapters)
 	timestamp := model.Time(1)
 
 	testCases := map[string]struct {
@@ -412,18 +397,6 @@ func TestMapPushErrorToErrorWithStatus(t *testing.T) {
 			expectedCode:    codes.Unavailable,
 			expectedMessage: fmt.Sprintf("wrapped: %s", newUnavailableError(services.Stopping).Error()),
 			expectedDetails: &mimirpb.ErrorDetails{Cause: mimirpb.SERVICE_UNAVAILABLE},
-		},
-		"an ingesterPushGrpcDisabledError gets translated into an errorWithStatus Unimplemented error with details": {
-			err:             ingesterPushGrpcDisabledError{},
-			expectedCode:    codes.Unimplemented,
-			expectedMessage: ingesterPushGrpcDisabledMsg,
-			expectedDetails: &mimirpb.ErrorDetails{Cause: mimirpb.METHOD_NOT_ALLOWED},
-		},
-		"a wrapped ingesterPushGrpcDisabledError gets translated into an errorWithStatus Unimplemented error": {
-			err:             fmt.Errorf("wrapped: %w", ingesterPushGrpcDisabledError{}),
-			expectedCode:    codes.Unimplemented,
-			expectedMessage: fmt.Sprintf("wrapped: %s", ingesterPushGrpcDisabledMsg),
-			expectedDetails: &mimirpb.ErrorDetails{Cause: mimirpb.METHOD_NOT_ALLOWED},
 		},
 		"an instanceLimitReachedError gets translated into a non-loggable errorWithStatus Unavailable error with details": {
 			err:              newInstanceLimitReachedError("instance limit reached"),
@@ -512,27 +485,27 @@ func TestMapPushErrorToErrorWithStatus(t *testing.T) {
 			expectedDetails: &mimirpb.ErrorDetails{Cause: mimirpb.BAD_DATA},
 		},
 		"a perMetricSeriesLimitReachedError gets translated into an errorWithStatus FailedPrecondition error with details": {
-			err:             newPerMetricSeriesLimitReachedError(10, labelAdapters),
+			err:             newPerMetricSeriesLimitReachedError(10, labels),
 			expectedCode:    codes.FailedPrecondition,
-			expectedMessage: newPerMetricSeriesLimitReachedError(10, labelAdapters).Error(),
+			expectedMessage: newPerMetricSeriesLimitReachedError(10, labels).Error(),
 			expectedDetails: &mimirpb.ErrorDetails{Cause: mimirpb.BAD_DATA},
 		},
 		"a wrapped perMetricSeriesLimitReachedError gets translated into an errorWithStatus FailedPrecondition error with details": {
-			err:             fmt.Errorf("wrapped: %w", newPerMetricSeriesLimitReachedError(10, labelAdapters)),
+			err:             fmt.Errorf("wrapped: %w", newPerMetricSeriesLimitReachedError(10, labels)),
 			expectedCode:    codes.FailedPrecondition,
-			expectedMessage: fmt.Sprintf("wrapped: %s", newPerMetricSeriesLimitReachedError(10, labelAdapters).Error()),
+			expectedMessage: fmt.Sprintf("wrapped: %s", newPerMetricSeriesLimitReachedError(10, labels).Error()),
 			expectedDetails: &mimirpb.ErrorDetails{Cause: mimirpb.BAD_DATA},
 		},
 		"a perMetricMetadataLimitReachedError gets translated into an errorWithStatus FailedPrecondition error with details": {
-			err:             newPerMetricMetadataLimitReachedError(10, family),
+			err:             newPerMetricMetadataLimitReachedError(10, labels),
 			expectedCode:    codes.FailedPrecondition,
-			expectedMessage: newPerMetricMetadataLimitReachedError(10, family).Error(),
+			expectedMessage: newPerMetricMetadataLimitReachedError(10, labels).Error(),
 			expectedDetails: &mimirpb.ErrorDetails{Cause: mimirpb.BAD_DATA},
 		},
 		"a wrapped perMetricMetadataLimitReachedError gets translated into an errorWithStatus FailedPrecondition error with details": {
-			err:             fmt.Errorf("wrapped: %w", newPerMetricMetadataLimitReachedError(10, family)),
+			err:             fmt.Errorf("wrapped: %w", newPerMetricMetadataLimitReachedError(10, labels)),
 			expectedCode:    codes.FailedPrecondition,
-			expectedMessage: fmt.Sprintf("wrapped: %s", newPerMetricMetadataLimitReachedError(10, family).Error()),
+			expectedMessage: fmt.Sprintf("wrapped: %s", newPerMetricMetadataLimitReachedError(10, labels).Error()),
 			expectedDetails: &mimirpb.ErrorDetails{Cause: mimirpb.BAD_DATA},
 		},
 	}
@@ -540,7 +513,7 @@ func TestMapPushErrorToErrorWithStatus(t *testing.T) {
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
 			handledErr := mapPushErrorToErrorWithStatus(tc.err)
-			stat, ok := grpcutil.ErrorToStatus(handledErr)
+			stat, ok := status.FromError(handledErr)
 			require.True(t, ok)
 			require.Equal(t, tc.expectedCode, stat.Code())
 			require.Equal(t, tc.expectedMessage, stat.Message())
@@ -557,8 +530,8 @@ func TestMapPushErrorToErrorWithStatus(t *testing.T) {
 func TestMapPushErrorToErrorWithHTTPOrGRPCStatus(t *testing.T) {
 	const originalMsg = "this is an error"
 	originalErr := errors.New(originalMsg)
-	family := "testmetric"
-	labelAdapters := []mimirpb.LabelAdapter{{Name: labels.MetricName, Value: family}, {Name: "foo", Value: "biz"}}
+	labelAdapters := []mimirpb.LabelAdapter{{Name: labels.MetricName, Value: "testmetric"}, {Name: "foo", Value: "biz"}}
+	labels := mimirpb.FromLabelAdaptersToLabels(labelAdapters)
 	timestamp := model.Time(1)
 
 	testCases := map[string]struct {
@@ -659,16 +632,16 @@ func TestMapPushErrorToErrorWithHTTPOrGRPCStatus(t *testing.T) {
 			),
 		},
 		"a perMetricSeriesLimitReachedError gets translated into an errorWithHTTPStatus 400 error": {
-			err: newPerMetricSeriesLimitReachedError(10, labelAdapters),
+			err: newPerMetricSeriesLimitReachedError(10, labels),
 			expectedTranslation: newErrorWithHTTPStatus(
-				newPerMetricSeriesLimitReachedError(10, labelAdapters),
+				newPerMetricSeriesLimitReachedError(10, labels),
 				http.StatusBadRequest,
 			),
 		},
 		"a wrapped perMetricSeriesLimitReachedError gets translated into an errorWithHTTPStatus 400 error": {
-			err: fmt.Errorf("wrapped: %w", newPerMetricSeriesLimitReachedError(10, labelAdapters)),
+			err: fmt.Errorf("wrapped: %w", newPerMetricSeriesLimitReachedError(10, labels)),
 			expectedTranslation: newErrorWithHTTPStatus(
-				fmt.Errorf("wrapped: %w", newPerMetricSeriesLimitReachedError(10, labelAdapters)),
+				fmt.Errorf("wrapped: %w", newPerMetricSeriesLimitReachedError(10, labels)),
 				http.StatusBadRequest,
 			),
 		},
@@ -687,31 +660,17 @@ func TestMapPushErrorToErrorWithHTTPOrGRPCStatus(t *testing.T) {
 			),
 		},
 		"a perMetricMetadataLimitReachedError gets translated into an errorWithHTTPStatus 400 error": {
-			err: newPerMetricMetadataLimitReachedError(10, family),
+			err: newPerMetricMetadataLimitReachedError(10, labels),
 			expectedTranslation: newErrorWithHTTPStatus(
-				newPerMetricMetadataLimitReachedError(10, family),
+				newPerMetricMetadataLimitReachedError(10, labels),
 				http.StatusBadRequest,
 			),
 		},
 		"a wrapped perMetricMetadataLimitReachedError gets translated into an errorWithHTTPStatus 400 error": {
-			err: fmt.Errorf("wrapped: %w", newPerMetricMetadataLimitReachedError(10, family)),
+			err: fmt.Errorf("wrapped: %w", newPerMetricMetadataLimitReachedError(10, labels)),
 			expectedTranslation: newErrorWithHTTPStatus(
-				fmt.Errorf("wrapped: %w", newPerMetricMetadataLimitReachedError(10, family)),
+				fmt.Errorf("wrapped: %w", newPerMetricMetadataLimitReachedError(10, labels)),
 				http.StatusBadRequest,
-			),
-		},
-		"an ingesterPushGrpcDisabledError gets translated into an errorWithStatus Unimplemented error": {
-			err: ingesterPushGrpcDisabledError{},
-			expectedTranslation: newErrorWithStatus(
-				ingesterPushGrpcDisabledError{},
-				codes.Unimplemented,
-			),
-		},
-		"a wrapped ingesterPushGrpcDisabledError gets translated into an errorWithStatus Unimplemented error": {
-			err: fmt.Errorf("wrapped: %w", ingesterPushGrpcDisabledError{}),
-			expectedTranslation: newErrorWithStatus(
-				fmt.Errorf("wrapped: %w", ingesterPushGrpcDisabledError{}),
-				codes.Unimplemented,
 			),
 		},
 	}
@@ -757,23 +716,23 @@ func TestMapReadErrorToErrorWithStatus(t *testing.T) {
 			expectedMessage: fmt.Sprintf("wrapped: %s", newUnavailableError(services.Stopping).Error()),
 			expectedDetails: &mimirpb.ErrorDetails{Cause: mimirpb.SERVICE_UNAVAILABLE},
 		},
-		"errTooBusy gets translated into an errorWithStatus ResourceExhausted error with details": {
-			err:             errTooBusy,
+		"tooBusyError gets translated into an errorWithStatus ResourceExhausted error with details": {
+			err:             tooBusyError,
 			expectedCode:    codes.ResourceExhausted,
-			expectedMessage: ingesterTooBusyMsg,
+			expectedMessage: tooBusyErrorMsg,
 			expectedDetails: &mimirpb.ErrorDetails{Cause: mimirpb.TOO_BUSY},
 		},
-		"a wrapped errTooBusy gets translated into an errorWithStatus ResourceExhausted error with details": {
-			err:             fmt.Errorf("wrapped: %w", errTooBusy),
+		"a wrapped tooBusyError gets translated into an errorWithStatus ResourceExhausted error with details": {
+			err:             fmt.Errorf("wrapped: %w", tooBusyError),
 			expectedCode:    codes.ResourceExhausted,
-			expectedMessage: fmt.Sprintf("wrapped: %s", ingesterTooBusyMsg),
+			expectedMessage: fmt.Sprintf("wrapped: %s", tooBusyErrorMsg),
 			expectedDetails: &mimirpb.ErrorDetails{Cause: mimirpb.TOO_BUSY},
 		},
 	}
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
 			handledErr := mapReadErrorToErrorWithStatus(tc.err)
-			stat, ok := grpcutil.ErrorToStatus(handledErr)
+			stat, ok := status.FromError(handledErr)
 			require.True(t, ok)
 			require.Equal(t, tc.expectedCode, stat.Code())
 			require.Equal(t, tc.expectedMessage, stat.Message())
@@ -802,13 +761,13 @@ func TestMapReadErrorToErrorWithHTTPOrGRPCStatus(t *testing.T) {
 			err:                 fmt.Errorf("wrapped: %w", newUnavailableError(services.Stopping)),
 			expectedTranslation: newErrorWithStatus(fmt.Errorf("wrapped: %w", newUnavailableError(services.Stopping)), codes.Unavailable),
 		},
-		"errTooBusy gets translated into an errorWithHTTPStatus with status code 503": {
-			err:                 errTooBusy,
-			expectedTranslation: newErrorWithHTTPStatus(errTooBusy, http.StatusServiceUnavailable),
+		"tooBusyError gets translated into an errorWithHTTPStatus with status code 503": {
+			err:                 tooBusyError,
+			expectedTranslation: newErrorWithHTTPStatus(tooBusyError, http.StatusServiceUnavailable),
 		},
-		"a wrapped errTooBusy gets translated into an errorWithStatus with status code 503": {
-			err:                 fmt.Errorf("wrapped: %w", errTooBusy),
-			expectedTranslation: newErrorWithHTTPStatus(fmt.Errorf("wrapped: %w", errTooBusy), http.StatusServiceUnavailable),
+		"a wrapped tooBusyError gets translated into an errorWithStatus with status code 503": {
+			err:                 fmt.Errorf("wrapped: %w", tooBusyError),
+			expectedTranslation: newErrorWithHTTPStatus(fmt.Errorf("wrapped: %w", tooBusyError), http.StatusServiceUnavailable),
 		},
 	}
 	for name, tc := range testCases {

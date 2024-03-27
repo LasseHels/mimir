@@ -14,7 +14,6 @@
 package scrape
 
 import (
-	"errors"
 	"fmt"
 	"hash/fnv"
 	"reflect"
@@ -23,6 +22,7 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	config_util "github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
@@ -32,7 +32,6 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/util/osutil"
-	"github.com/prometheus/prometheus/util/pool"
 )
 
 // NewManager is the Manager constructor.
@@ -58,7 +57,6 @@ func NewManager(o *Options, logger log.Logger, app storage.Appendable, registere
 		graceShut:     make(chan struct{}),
 		triggerReload: make(chan struct{}, 1),
 		metrics:       sm,
-		buffers:       pool.New(1e3, 100e6, 3, func(sz int) interface{} { return make([]byte, 0, sz) }),
 	}
 
 	m.metrics.setTargetMetadataCacheGatherer(m)
@@ -78,15 +76,9 @@ type Options struct {
 	EnableMetadataStorage bool
 	// Option to increase the interval used by scrape manager to throttle target groups updates.
 	DiscoveryReloadInterval model.Duration
-	// Option to enable the ingestion of the created timestamp as a synthetic zero sample.
-	// See: https://github.com/prometheus/proposals/blob/main/proposals/2023-06-13_created-timestamp.md
-	EnableCreatedTimestampZeroIngestion bool
 
 	// Optional HTTP client options to use when scraping.
 	HTTPClientOptions []config_util.HTTPClientOption
-
-	// private option for testability.
-	skipOffsetting bool
 }
 
 // Manager maintains a set of scrape pools and manages start/stop cycles
@@ -102,7 +94,6 @@ type Manager struct {
 	scrapeConfigs map[string]*config.ScrapeConfig
 	scrapePools   map[string]*scrapePool
 	targetSets    map[string][]*targetgroup.Group
-	buffers       *pool.Pool
 
 	triggerReload chan struct{}
 
@@ -165,7 +156,7 @@ func (m *Manager) reload() {
 				continue
 			}
 			m.metrics.targetScrapePools.Inc()
-			sp, err := newScrapePool(scrapeConfig, m.append, m.offsetSeed, log.With(m.logger, "scrape_pool", setName), m.buffers, m.opts, m.metrics)
+			sp, err := newScrapePool(scrapeConfig, m.append, m.offsetSeed, log.With(m.logger, "scrape_pool", setName), m.opts, m.metrics)
 			if err != nil {
 				m.metrics.targetScrapePoolsFailed.Inc()
 				level.Error(m.logger).Log("msg", "error creating new scrape pool", "err", err, "scrape_pool", setName)
@@ -288,10 +279,24 @@ func (m *Manager) TargetsActive() map[string][]*Target {
 	m.mtxScrape.Lock()
 	defer m.mtxScrape.Unlock()
 
+	var (
+		wg  sync.WaitGroup
+		mtx sync.Mutex
+	)
+
 	targets := make(map[string][]*Target, len(m.scrapePools))
+	wg.Add(len(m.scrapePools))
 	for tset, sp := range m.scrapePools {
-		targets[tset] = sp.ActiveTargets()
+		// Running in parallel limits the blocking time of scrapePool to scrape
+		// interval when there's an update from SD.
+		go func(tset string, sp *scrapePool) {
+			mtx.Lock()
+			targets[tset] = sp.ActiveTargets()
+			mtx.Unlock()
+			wg.Done()
+		}(tset, sp)
 	}
+	wg.Wait()
 	return targets
 }
 

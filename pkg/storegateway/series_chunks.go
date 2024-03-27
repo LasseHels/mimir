@@ -27,8 +27,9 @@ const (
 	// number of chunks (across series).
 	seriesChunksSlabSize = 1000
 
-	// Selected so that many chunks fit within the slab size with low fragmentation, because
-	// byte slices are at most 16KB each as received by the caching bucket.
+	// Selected so that many chunks fit within the slab size with low fragmentation, either when
+	// fine-grained chunks cache is enabled (byte slices have variable size and contain many chunks) or disabled (byte slices
+	// are at most 16KB each).
 	chunkBytesSlabSize = 160 * 1024
 
 	// Selected so that most series fit it and at the same time it's not too large for requests with few series.
@@ -56,9 +57,14 @@ var (
 	})
 )
 
-type iterator[V any] interface {
+// seriesChunksSetIterator is the interface implemented by an iterator returning a sequence of seriesChunksSet.
+type seriesChunksSetIterator interface {
 	Next() bool
-	At() V
+
+	// At returns the current seriesChunksSet. The caller should (but NOT must) invoke seriesChunksSet.release()
+	// on the returned set once it's guaranteed it will not be used anymore.
+	At() seriesChunksSet
+
 	Err() error
 }
 
@@ -161,13 +167,13 @@ func (b seriesChunksSet) len() int {
 }
 
 type seriesChunksSeriesSet struct {
-	from iterator[seriesChunksSet]
+	from seriesChunksSetIterator
 
 	currSet    seriesChunksSet
 	currOffset int
 }
 
-func newSeriesChunksSeriesSet(from iterator[seriesChunksSet]) storepb.SeriesSet {
+func newSeriesChunksSeriesSet(from seriesChunksSetIterator) storepb.SeriesSet {
 	return &seriesChunksSeriesSet{
 		from: from,
 	}
@@ -178,14 +184,14 @@ func newChunksPreloadingIterator(
 	logger log.Logger,
 	userID string,
 	chunkReaders bucketChunkReaders,
-	refsIterator iterator[seriesChunkRefsSet],
+	refsIterator seriesChunkRefsSetIterator,
 	refsIteratorBatchSize int,
 	stats *safeQueryStats,
-) iterator[seriesChunksSet] {
-	var it iterator[seriesChunksSet]
-	it = newLoadingSeriesChunksSetIterator(ctx, logger, userID, chunkReaders, refsIterator, refsIteratorBatchSize, stats)
-	it = newPreloadingAndStatsTrackingSetIterator(ctx, 1, it, stats)
-	return it
+) seriesChunksSetIterator {
+	var iterator seriesChunksSetIterator
+	iterator = newLoadingSeriesChunksSetIterator(ctx, logger, userID, chunkReaders, refsIterator, refsIteratorBatchSize, stats)
+	iterator = newPreloadingAndStatsTrackingSetIterator[seriesChunksSet](ctx, 1, iterator, stats)
+	return iterator
 }
 
 // Next advances to the next item. Once the underlying seriesChunksSet has been fully consumed
@@ -229,9 +235,15 @@ type preloadedSeriesChunksSet[T any] struct {
 	err error
 }
 
+type genericIterator[V any] interface {
+	Next() bool
+	At() V
+	Err() error
+}
+
 type preloadingSetIterator[Set any] struct {
 	ctx  context.Context
-	from iterator[Set]
+	from genericIterator[Set]
 
 	current Set
 
@@ -239,7 +251,7 @@ type preloadingSetIterator[Set any] struct {
 	err       error
 }
 
-func newPreloadingSetIterator[Set any](ctx context.Context, preloadedSetsCount int, from iterator[Set]) *preloadingSetIterator[Set] {
+func newPreloadingSetIterator[Set any](ctx context.Context, preloadedSetsCount int, from genericIterator[Set]) *preloadingSetIterator[Set] {
 	preloadedSet := &preloadingSetIterator[Set]{
 		ctx:       ctx,
 		from:      from,
@@ -287,7 +299,7 @@ func (p *preloadingSetIterator[Set]) Err() error {
 	return p.err
 }
 
-func newPreloadingAndStatsTrackingSetIterator[Set any](ctx context.Context, preloadedSetsCount int, iterator iterator[Set], stats *safeQueryStats) iterator[Set] {
+func newPreloadingAndStatsTrackingSetIterator[Set any](ctx context.Context, preloadedSetsCount int, iterator genericIterator[Set], stats *safeQueryStats) genericIterator[Set] {
 	// Track the time spent loading batches (including preloading).
 	numBatches := 0
 	iterator = newNextDurationMeasuringIterator[Set](iterator, func(duration time.Duration, hasNext bool) {
@@ -319,7 +331,7 @@ type loadingSeriesChunksSetIterator struct {
 	logger        log.Logger
 	userID        string
 	chunkReaders  bucketChunkReaders
-	from          iterator[seriesChunkRefsSet]
+	from          seriesChunkRefsSetIterator
 	fromBatchSize int
 	stats         *safeQueryStats
 
@@ -332,7 +344,7 @@ func newLoadingSeriesChunksSetIterator(
 	logger log.Logger,
 	userID string,
 	chunkReaders bucketChunkReaders,
-	from iterator[seriesChunkRefsSet],
+	from seriesChunkRefsSetIterator,
 	fromBatchSize int,
 	stats *safeQueryStats,
 ) *loadingSeriesChunksSetIterator {
@@ -473,11 +485,11 @@ func chunksSizeInSegmentFile(chks []storepb.AggrChunk) int {
 }
 
 type nextDurationMeasuringIterator[Set any] struct {
-	from     iterator[Set]
+	from     genericIterator[Set]
 	observer func(duration time.Duration, hasNext bool)
 }
 
-func newNextDurationMeasuringIterator[Set any](from iterator[Set], observer func(duration time.Duration, hasNext bool)) iterator[Set] {
+func newNextDurationMeasuringIterator[Set any](from genericIterator[Set], observer func(duration time.Duration, hasNext bool)) genericIterator[Set] {
 	return &nextDurationMeasuringIterator[Set]{
 		from:     from,
 		observer: observer,

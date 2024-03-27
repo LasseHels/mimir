@@ -18,7 +18,6 @@ import (
 	"github.com/grafana/dskit/test"
 	"github.com/prometheus/alertmanager/cluster/clusterpb"
 	"github.com/prometheus/alertmanager/config"
-	"github.com/prometheus/alertmanager/featurecontrol"
 	"github.com/prometheus/alertmanager/types"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -63,7 +62,6 @@ func createAlertmanagerAndSendAlerts(t *testing.T, alertGroups, groupsLimit, exp
 		UserID:            user,
 		Logger:            log.NewNopLogger(),
 		Limits:            &mockAlertManagerLimits{maxDispatcherAggregationGroups: groupsLimit},
-		Features:          featurecontrol.NoopFlags{},
 		TenantDataDir:     t.TempDir(),
 		ExternalURL:       &url.URL{Path: "/am"},
 		ShardingEnabled:   true,
@@ -148,7 +146,6 @@ func TestDispatcherLoggerInsightKey(t *testing.T) {
 		UserID:            user,
 		Logger:            logger,
 		Limits:            &mockAlertManagerLimits{maxDispatcherAggregationGroups: 10},
-		Features:          featurecontrol.NoopFlags{},
 		TenantDataDir:     t.TempDir(),
 		ExternalURL:       &url.URL{Path: "/am"},
 		ShardingEnabled:   true,

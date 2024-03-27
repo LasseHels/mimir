@@ -23,9 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/grafana/mimir/pkg/cardinality"
-	pkg_distributor "github.com/grafana/mimir/pkg/distributor"
 	"github.com/grafana/mimir/pkg/ingester/client"
-	"github.com/grafana/mimir/pkg/querier/api"
 	"github.com/grafana/mimir/pkg/util/validation"
 )
 
@@ -48,7 +46,7 @@ func TestLabelNamesCardinalityHandler(t *testing.T) {
 	require.Equal(t, http.StatusOK, recorder.Result().StatusCode)
 	body := recorder.Result().Body
 	defer body.Close()
-	responseBody := api.LabelNamesCardinalityResponse{}
+	responseBody := LabelNamesCardinalityResponse{}
 	bodyContent, err := io.ReadAll(body)
 	require.NoError(t, err)
 	err = json.Unmarshal(bodyContent, &responseBody)
@@ -56,13 +54,13 @@ func TestLabelNamesCardinalityHandler(t *testing.T) {
 	require.Equal(t, 4, responseBody.LabelNamesCount)
 	require.Equal(t, 8, responseBody.LabelValuesCountTotal)
 	require.Len(t, responseBody.Cardinality, 4)
-	require.Equal(t, responseBody.Cardinality[0], &api.LabelNamesCardinalityItem{LabelName: "label-z", LabelValuesCount: 3},
+	require.Equal(t, responseBody.Cardinality[0], &LabelNamesCardinalityItem{LabelName: "label-z", LabelValuesCount: 3},
 		"items must be sorted by LabelValuesCount in DESC order and by LabelName in ASC order")
-	require.Equal(t, responseBody.Cardinality[1], &api.LabelNamesCardinalityItem{LabelName: "label-a", LabelValuesCount: 2},
+	require.Equal(t, responseBody.Cardinality[1], &LabelNamesCardinalityItem{LabelName: "label-a", LabelValuesCount: 2},
 		"items must be sorted by LabelValuesCount in DESC order and by LabelName in ASC order")
-	require.Equal(t, responseBody.Cardinality[2], &api.LabelNamesCardinalityItem{LabelName: "label-b", LabelValuesCount: 2},
+	require.Equal(t, responseBody.Cardinality[2], &LabelNamesCardinalityItem{LabelName: "label-b", LabelValuesCount: 2},
 		"items must be sorted by LabelValuesCount in DESC order and by LabelName in ASC order")
-	require.Equal(t, responseBody.Cardinality[3], &api.LabelNamesCardinalityItem{LabelName: "label-c", LabelValuesCount: 1},
+	require.Equal(t, responseBody.Cardinality[3], &LabelNamesCardinalityItem{LabelName: "label-c", LabelValuesCount: 1},
 		"items must be sorted by LabelValuesCount in DESC order and by LabelName in ASC order")
 }
 
@@ -117,7 +115,7 @@ func TestLabelNamesCardinalityHandler_MatchersTest(t *testing.T) {
 			bodyContent, err := io.ReadAll(body)
 			require.NoError(t, err)
 			require.Equal(t, http.StatusOK, recorder.Result().StatusCode, "unexpected error %v", string(bodyContent))
-			distributor.AssertCalled(t, "LabelNamesAndValues", mock.Anything, data.expectedMatchers, cardinality.InMemoryMethod)
+			distributor.AssertCalled(t, "LabelNamesAndValues", mock.Anything, data.expectedMatchers)
 		})
 	}
 }
@@ -170,7 +168,7 @@ func TestLabelNamesCardinalityHandler_LimitTest(t *testing.T) {
 			require.Equal(t, http.StatusOK, recorder.Result().StatusCode)
 			body := recorder.Result().Body
 			defer body.Close()
-			responseBody := api.LabelNamesCardinalityResponse{}
+			responseBody := LabelNamesCardinalityResponse{}
 			bodyContent, err := io.ReadAll(body)
 			require.NoError(t, err)
 			err = json.Unmarshal(bodyContent, &responseBody)
@@ -306,7 +304,7 @@ func TestLabelValuesCardinalityHandler_Success(t *testing.T) {
 		matcher                []*labels.Matcher
 		scope                  cardinality.CountMethod
 		labelValuesCardinality *client.LabelValuesCardinalityResponse
-		expectedResponse       api.LabelValuesCardinalityResponse
+		expectedResponse       labelValuesCardinalityResponse
 	}{
 		"should return the label values cardinality for the specified label name": {
 			getRequestParams: "?label_names[]=__name__",
@@ -322,13 +320,13 @@ func TestLabelValuesCardinalityHandler_Success(t *testing.T) {
 					LabelValueSeries: map[string]uint64{"test_1": 10},
 				}},
 			},
-			expectedResponse: api.LabelValuesCardinalityResponse{
+			expectedResponse: labelValuesCardinalityResponse{
 				SeriesCountTotal: seriesCountTotal,
-				Labels: []api.LabelNamesCardinality{{
+				Labels: []labelNamesCardinality{{
 					LabelName:        "__name__",
 					LabelValuesCount: 1,
 					SeriesCount:      10,
-					Cardinality: []api.LabelValuesCardinality{
+					Cardinality: []labelValuesCardinality{
 						{LabelValue: "test_1", SeriesCount: 10},
 					},
 				}},
@@ -349,13 +347,13 @@ func TestLabelValuesCardinalityHandler_Success(t *testing.T) {
 					LabelValueSeries: map[string]uint64{"test_1": 10},
 				}},
 			},
-			expectedResponse: api.LabelValuesCardinalityResponse{
+			expectedResponse: labelValuesCardinalityResponse{
 				SeriesCountTotal: seriesCountTotal,
-				Labels: []api.LabelNamesCardinality{{
+				Labels: []labelNamesCardinality{{
 					LabelName:        "__name__",
 					LabelValuesCount: 1,
 					SeriesCount:      10,
-					Cardinality: []api.LabelValuesCardinality{
+					Cardinality: []labelValuesCardinality{
 						{LabelValue: "test_1", SeriesCount: 10},
 					},
 				}},
@@ -381,14 +379,14 @@ func TestLabelValuesCardinalityHandler_Success(t *testing.T) {
 					},
 				},
 			},
-			expectedResponse: api.LabelValuesCardinalityResponse{
+			expectedResponse: labelValuesCardinalityResponse{
 				SeriesCountTotal: seriesCountTotal,
-				Labels: []api.LabelNamesCardinality{
+				Labels: []labelNamesCardinality{
 					{
 						LabelName:        "bar",
 						LabelValuesCount: 1,
 						SeriesCount:      20,
-						Cardinality: []api.LabelValuesCardinality{
+						Cardinality: []labelValuesCardinality{
 							{LabelValue: "test_1", SeriesCount: 20},
 						},
 					},
@@ -396,7 +394,7 @@ func TestLabelValuesCardinalityHandler_Success(t *testing.T) {
 						LabelName:        "foo",
 						LabelValuesCount: 1,
 						SeriesCount:      10,
-						Cardinality: []api.LabelValuesCardinality{
+						Cardinality: []labelValuesCardinality{
 							{LabelValue: "test_1", SeriesCount: 10},
 						},
 					},
@@ -423,14 +421,14 @@ func TestLabelValuesCardinalityHandler_Success(t *testing.T) {
 					},
 				},
 			},
-			expectedResponse: api.LabelValuesCardinalityResponse{
+			expectedResponse: labelValuesCardinalityResponse{
 				SeriesCountTotal: seriesCountTotal,
-				Labels: []api.LabelNamesCardinality{
+				Labels: []labelNamesCardinality{
 					{
 						LabelName:        "bar",
 						LabelValuesCount: 1,
 						SeriesCount:      10,
-						Cardinality: []api.LabelValuesCardinality{
+						Cardinality: []labelValuesCardinality{
 							{LabelValue: "test_1", SeriesCount: 10},
 						},
 					},
@@ -438,7 +436,7 @@ func TestLabelValuesCardinalityHandler_Success(t *testing.T) {
 						LabelName:        "foo",
 						LabelValuesCount: 1,
 						SeriesCount:      10,
-						Cardinality: []api.LabelValuesCardinality{
+						Cardinality: []labelValuesCardinality{
 							{LabelValue: "test_1", SeriesCount: 10},
 						},
 					},
@@ -459,13 +457,13 @@ func TestLabelValuesCardinalityHandler_Success(t *testing.T) {
 					LabelValueSeries: map[string]uint64{"test_1": 10, "test_2": 20},
 				}},
 			},
-			expectedResponse: api.LabelValuesCardinalityResponse{
+			expectedResponse: labelValuesCardinalityResponse{
 				SeriesCountTotal: seriesCountTotal,
-				Labels: []api.LabelNamesCardinality{{
+				Labels: []labelNamesCardinality{{
 					LabelName:        "__name__",
 					LabelValuesCount: 2,
 					SeriesCount:      30,
-					Cardinality: []api.LabelValuesCardinality{
+					Cardinality: []labelValuesCardinality{
 						{LabelValue: "test_2", SeriesCount: 20},
 						{LabelValue: "test_1", SeriesCount: 10},
 					},
@@ -486,13 +484,13 @@ func TestLabelValuesCardinalityHandler_Success(t *testing.T) {
 					LabelValueSeries: map[string]uint64{"test_1": 10, "test_2": 10},
 				}},
 			},
-			expectedResponse: api.LabelValuesCardinalityResponse{
+			expectedResponse: labelValuesCardinalityResponse{
 				SeriesCountTotal: seriesCountTotal,
-				Labels: []api.LabelNamesCardinality{{
+				Labels: []labelNamesCardinality{{
 					LabelName:        "__name__",
 					LabelValuesCount: 2,
 					SeriesCount:      20,
-					Cardinality: []api.LabelValuesCardinality{
+					Cardinality: []labelValuesCardinality{
 						{LabelValue: "test_1", SeriesCount: 10},
 						{LabelValue: "test_2", SeriesCount: 10},
 					},
@@ -514,13 +512,13 @@ func TestLabelValuesCardinalityHandler_Success(t *testing.T) {
 					LabelValueSeries: map[string]uint64{"test_1": 100, "test_2": 20, "test_3": 30},
 				}},
 			},
-			expectedResponse: api.LabelValuesCardinalityResponse{
+			expectedResponse: labelValuesCardinalityResponse{
 				SeriesCountTotal: seriesCountTotal,
-				Labels: []api.LabelNamesCardinality{{
+				Labels: []labelNamesCardinality{{
 					LabelName:        "__name__",
 					LabelValuesCount: 3,
 					SeriesCount:      150,
-					Cardinality: []api.LabelValuesCardinality{
+					Cardinality: []labelValuesCardinality{
 						{LabelValue: "test_1", SeriesCount: 100},
 						{LabelValue: "test_3", SeriesCount: 30},
 						{LabelValue: "test_2", SeriesCount: 20},
@@ -543,13 +541,13 @@ func TestLabelValuesCardinalityHandler_Success(t *testing.T) {
 					LabelValueSeries: map[string]uint64{"test_1": 100, "test_2": 20, "test_3": 30},
 				}},
 			},
-			expectedResponse: api.LabelValuesCardinalityResponse{
+			expectedResponse: labelValuesCardinalityResponse{
 				SeriesCountTotal: seriesCountTotal,
-				Labels: []api.LabelNamesCardinality{{
+				Labels: []labelNamesCardinality{{
 					LabelName:        "__name__",
 					LabelValuesCount: 3,
 					SeriesCount:      150,
-					Cardinality: []api.LabelValuesCardinality{
+					Cardinality: []labelValuesCardinality{
 						{LabelValue: "test_1", SeriesCount: 100},
 						{LabelValue: "test_3", SeriesCount: 30},
 					},
@@ -580,7 +578,7 @@ func TestLabelValuesCardinalityHandler_Success(t *testing.T) {
 			body := recorder.Result().Body
 			defer func() { _ = body.Close() }()
 
-			responseBody := api.LabelValuesCardinalityResponse{}
+			responseBody := labelValuesCardinalityResponse{}
 			bodyContent, err := io.ReadAll(body)
 			require.NoError(t, err)
 			err = json.Unmarshal(bodyContent, &responseBody)
@@ -600,7 +598,7 @@ func TestLabelValuesCardinalityHandler_Success(t *testing.T) {
 			body := recorder.Result().Body
 			defer func() { _ = body.Close() }()
 
-			responseBody := api.LabelValuesCardinalityResponse{}
+			responseBody := labelValuesCardinalityResponse{}
 			bodyContent, err := io.ReadAll(body)
 			require.NoError(t, err)
 			err = json.Unmarshal(bodyContent, &responseBody)
@@ -794,33 +792,25 @@ func TestActiveSeriesCardinalityHandler(t *testing.T) {
 		name                 string
 		requestParams        map[string][]string
 		expectMatcherSetSize int
-		returnedError        error
-		expectStatusCode     int
+		expectError          bool
 	}{
 		{
-			name:             "should error on missing selector param",
-			expectStatusCode: http.StatusBadRequest,
+			name:        "should error on missing selector param",
+			expectError: true,
 		},
 		{
-			name:             "should error on invalid selector",
-			requestParams:    map[string][]string{"selector": {"-not-valid-"}},
-			expectStatusCode: http.StatusBadRequest,
+			name:          "should error on invalid selector",
+			requestParams: map[string][]string{"selector": {"-not-valid-"}},
+			expectError:   true,
 		},
 		{
-			name:             "should error on multiple selectors",
-			requestParams:    map[string][]string{"selector": {"a", "b"}},
-			expectStatusCode: http.StatusBadRequest,
+			name:          "should error on multiple selectors",
+			requestParams: map[string][]string{"selector": {"a", "b"}},
+			expectError:   true,
 		},
 		{
-			name:             "valid selector",
-			requestParams:    map[string][]string{"selector": {`{job="prometheus"}`}},
-			expectStatusCode: http.StatusOK,
-		},
-		{
-			name:             "upstream error: response too large",
-			requestParams:    map[string][]string{"selector": {`{job="prometheus"}`}},
-			returnedError:    pkg_distributor.ErrResponseTooLarge,
-			expectStatusCode: http.StatusRequestEntityTooLarge,
+			name:          "valid selector",
+			requestParams: map[string][]string{"selector": {`{job="prometheus"}`}},
 		},
 	}
 
@@ -832,7 +822,7 @@ func TestActiveSeriesCardinalityHandler(t *testing.T) {
 				labels.FromStrings("__name__", "up", "job", "prometheus"),
 				labels.FromStrings("__name__", "process_start_time_seconds", "job", "prometheus"),
 			}
-			d.On("ActiveSeries", mock.Anything, mock.Anything).Return(series, test.returnedError)
+			d.On("ActiveSeries", mock.Anything, mock.Anything).Return(series, nil)
 
 			handler := createEnabledHandler(t, ActiveSeriesCardinalityHandler, d)
 			ctx := user.InjectOrgID(context.Background(), "test")
@@ -850,9 +840,8 @@ func TestActiveSeriesCardinalityHandler(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			handler.ServeHTTP(recorder, request)
 
-			assert.Equal(t, test.expectStatusCode, recorder.Result().StatusCode)
-
-			if test.expectStatusCode != http.StatusOK {
+			if test.expectError {
+				require.Equal(t, http.StatusBadRequest, recorder.Result().StatusCode)
 				return
 			}
 
@@ -866,7 +855,7 @@ func TestActiveSeriesCardinalityHandler(t *testing.T) {
 			bodyContent, err := io.ReadAll(body)
 			require.NoError(t, err)
 
-			resp := api.ActiveSeriesResponse{}
+			resp := activeSeriesResponse{}
 			err = json.Unmarshal(bodyContent, &resp)
 			require.NoError(t, err)
 			assert.Len(t, resp.Data, len(series))
@@ -937,7 +926,7 @@ func generateLabelValues(count int) ([]*client.LabelValues, int) {
 
 func mockDistributorLabelNamesAndValues(items []*client.LabelValues, err error) *mockDistributor {
 	distributor := &mockDistributor{}
-	distributor.On("LabelNamesAndValues", mock.Anything, mock.Anything, mock.Anything).Return(&client.LabelNamesAndValuesResponse{Items: items}, err)
+	distributor.On("LabelNamesAndValues", mock.Anything, mock.Anything).Return(&client.LabelNamesAndValuesResponse{Items: items}, err)
 	return distributor
 }
 

@@ -4,6 +4,7 @@
 package integration
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
@@ -19,7 +20,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/grafana/mimir/integration/e2emimir"
-	"github.com/grafana/mimir/pkg/querier/api"
 )
 
 // Define cardinality 'env' and 'job' label sets.
@@ -29,17 +29,28 @@ var cardinalityJobLabelValues = []string{"distributor", "ingester", "store-gatew
 func TestQuerierLabelNamesAndValues(t *testing.T) {
 	const numSeriesToPush = 1000
 
+	// Define response types.
+	type labelNamesAndValuesCardinality struct {
+		LabelName        string `json:"label_name"`
+		LabelValuesCount int    `json:"label_values_count"`
+	}
+	type labelNamesAndValuesResponse struct {
+		LabelValuesCountTotal int                              `json:"label_values_count_total"`
+		LabelNamesCount       int                              `json:"label_names_count"`
+		Cardinality           []labelNamesAndValuesCardinality `json:"cardinality"`
+	}
+
 	// Test cases
 	tests := map[string]struct {
 		selector       string
 		limit          int
-		expectedResult api.LabelNamesCardinalityResponse
+		expectedResult labelNamesAndValuesResponse
 	}{
 		"obtain label names and values with default selector and limit": {
-			expectedResult: api.LabelNamesCardinalityResponse{
+			expectedResult: labelNamesAndValuesResponse{
 				LabelValuesCountTotal: 1008,
 				LabelNamesCount:       3,
-				Cardinality: []*api.LabelNamesCardinalityItem{
+				Cardinality: []labelNamesAndValuesCardinality{
 					{LabelName: labels.MetricName, LabelValuesCount: 1000},
 					{LabelName: "job", LabelValuesCount: 5},
 					{LabelName: "env", LabelValuesCount: 3},
@@ -48,10 +59,10 @@ func TestQuerierLabelNamesAndValues(t *testing.T) {
 		},
 		"apply request selector": {
 			selector: "{job=~'store-.*'}",
-			expectedResult: api.LabelNamesCardinalityResponse{
+			expectedResult: labelNamesAndValuesResponse{
 				LabelValuesCountTotal: 204,
 				LabelNamesCount:       3,
-				Cardinality: []*api.LabelNamesCardinalityItem{
+				Cardinality: []labelNamesAndValuesCardinality{
 					{LabelName: labels.MetricName, LabelValuesCount: 200},
 					{LabelName: "env", LabelValuesCount: 3},
 					{LabelName: "job", LabelValuesCount: 1},
@@ -60,10 +71,10 @@ func TestQuerierLabelNamesAndValues(t *testing.T) {
 		},
 		"limit cardinality response elements": {
 			limit: 1,
-			expectedResult: api.LabelNamesCardinalityResponse{
+			expectedResult: labelNamesAndValuesResponse{
 				LabelValuesCountTotal: 1008,
 				LabelNamesCount:       3,
-				Cardinality: []*api.LabelNamesCardinalityItem{
+				Cardinality: []labelNamesAndValuesCardinality{
 					{LabelName: labels.MetricName, LabelValuesCount: 1000},
 				},
 			},
@@ -71,10 +82,10 @@ func TestQuerierLabelNamesAndValues(t *testing.T) {
 		"apply request selector and limit": {
 			selector: "{job=~'store-.*'}",
 			limit:    1,
-			expectedResult: api.LabelNamesCardinalityResponse{
+			expectedResult: labelNamesAndValuesResponse{
 				LabelValuesCountTotal: 204,
 				LabelNamesCount:       3,
-				Cardinality: []*api.LabelNamesCardinalityItem{
+				Cardinality: []labelNamesAndValuesCardinality{
 					{LabelName: labels.MetricName, LabelValuesCount: 200},
 				},
 			},
@@ -167,34 +178,57 @@ func TestQuerierLabelNamesAndValues(t *testing.T) {
 			})
 
 			// Fetch label names and values.
-			lbNamesAndValuesResp, err := client.LabelNamesAndValues(tc.selector, tc.limit)
+			res, err := client.LabelNamesAndValues(tc.selector, tc.limit)
 			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, res.StatusCode)
 
 			// Test results.
-			require.Equal(t, tc.expectedResult, *lbNamesAndValuesResp)
+			var lbNamesAndValuesResp labelNamesAndValuesResponse
+			require.NoError(t, json.NewDecoder(res.Body).Decode(&lbNamesAndValuesResp))
+
+			require.Equal(t, tc.expectedResult, lbNamesAndValuesResp)
 		})
 	}
 }
 
 func TestQuerierLabelValuesCardinality(t *testing.T) {
 	const numSeriesToPush = 1000
+
+	// Define response types.
+	type labelValuesCardinality struct {
+		LabelValue  string `json:"label_value"`
+		SeriesCount uint64 `json:"series_count"`
+	}
+
+	type labelNamesCardinality struct {
+		LabelName        string                   `json:"label_name"`
+		LabelValuesCount uint64                   `json:"label_values_count"`
+		SeriesCount      uint64                   `json:"series_count"`
+		Cardinality      []labelValuesCardinality `json:"cardinality"`
+	}
+
+	type labelValuesCardinalityResponse struct {
+		SeriesCountTotal uint64                  `json:"series_count_total"`
+		Labels           []labelNamesCardinality `json:"labels"`
+	}
+
 	// Test cases
 	tests := map[string]struct {
 		labelNames     []string
 		selector       string
 		limit          int
-		expectedResult api.LabelValuesCardinalityResponse
+		expectedResult labelValuesCardinalityResponse
 	}{
 		"obtain labels cardinality with default selector and limit": {
 			labelNames: []string{"env", "job"},
-			expectedResult: api.LabelValuesCardinalityResponse{
+			expectedResult: labelValuesCardinalityResponse{
 				SeriesCountTotal: numSeriesToPush,
-				Labels: []api.LabelNamesCardinality{
+				Labels: []labelNamesCardinality{
 					{
 						LabelName:        "env",
 						LabelValuesCount: 3,
 						SeriesCount:      1000,
-						Cardinality: []api.LabelValuesCardinality{
+						Cardinality: []labelValuesCardinality{
 							{LabelValue: "staging", SeriesCount: 334},
 							{LabelValue: "dev", SeriesCount: 333},
 							{LabelValue: "prod", SeriesCount: 333},
@@ -204,7 +238,7 @@ func TestQuerierLabelValuesCardinality(t *testing.T) {
 						LabelName:        "job",
 						LabelValuesCount: 5,
 						SeriesCount:      1000,
-						Cardinality: []api.LabelValuesCardinality{
+						Cardinality: []labelValuesCardinality{
 							{LabelValue: "compactor", SeriesCount: 200},
 							{LabelValue: "distributor", SeriesCount: 200},
 							{LabelValue: "ingester", SeriesCount: 200},
@@ -217,14 +251,14 @@ func TestQuerierLabelValuesCardinality(t *testing.T) {
 		},
 		"obtain env label cardinality with default selector": {
 			labelNames: []string{"env"},
-			expectedResult: api.LabelValuesCardinalityResponse{
+			expectedResult: labelValuesCardinalityResponse{
 				SeriesCountTotal: numSeriesToPush,
-				Labels: []api.LabelNamesCardinality{
+				Labels: []labelNamesCardinality{
 					{
 						LabelName:        "env",
 						LabelValuesCount: 3,
 						SeriesCount:      1000,
-						Cardinality: []api.LabelValuesCardinality{
+						Cardinality: []labelValuesCardinality{
 							{LabelValue: "staging", SeriesCount: 334},
 							{LabelValue: "dev", SeriesCount: 333},
 							{LabelValue: "prod", SeriesCount: 333},
@@ -236,14 +270,14 @@ func TestQuerierLabelValuesCardinality(t *testing.T) {
 		"obtain labels cardinality applying selector": {
 			labelNames: []string{"env", "job"},
 			selector:   "{job=~'store-.*'}",
-			expectedResult: api.LabelValuesCardinalityResponse{
+			expectedResult: labelValuesCardinalityResponse{
 				SeriesCountTotal: numSeriesToPush,
-				Labels: []api.LabelNamesCardinality{
+				Labels: []labelNamesCardinality{
 					{
 						LabelName:        "env",
 						LabelValuesCount: 3,
 						SeriesCount:      200,
-						Cardinality: []api.LabelValuesCardinality{
+						Cardinality: []labelValuesCardinality{
 							{LabelValue: "dev", SeriesCount: 67},
 							{LabelValue: "staging", SeriesCount: 67},
 							{LabelValue: "prod", SeriesCount: 66},
@@ -253,7 +287,7 @@ func TestQuerierLabelValuesCardinality(t *testing.T) {
 						LabelName:        "job",
 						LabelValuesCount: 1,
 						SeriesCount:      200,
-						Cardinality: []api.LabelValuesCardinality{
+						Cardinality: []labelValuesCardinality{
 							{LabelValue: "store-gateway", SeriesCount: 200},
 						},
 					},
@@ -263,14 +297,14 @@ func TestQuerierLabelValuesCardinality(t *testing.T) {
 		"obtain labels cardinality with default and custom limit": {
 			labelNames: []string{"env", "job"},
 			limit:      2,
-			expectedResult: api.LabelValuesCardinalityResponse{
+			expectedResult: labelValuesCardinalityResponse{
 				SeriesCountTotal: numSeriesToPush,
-				Labels: []api.LabelNamesCardinality{
+				Labels: []labelNamesCardinality{
 					{
 						LabelName:        "env",
 						LabelValuesCount: 3,
 						SeriesCount:      1000,
-						Cardinality: []api.LabelValuesCardinality{
+						Cardinality: []labelValuesCardinality{
 							{LabelValue: "staging", SeriesCount: 334},
 							{LabelValue: "dev", SeriesCount: 333},
 						},
@@ -279,7 +313,7 @@ func TestQuerierLabelValuesCardinality(t *testing.T) {
 						LabelName:        "job",
 						LabelValuesCount: 5,
 						SeriesCount:      1000,
-						Cardinality: []api.LabelValuesCardinality{
+						Cardinality: []labelValuesCardinality{
 							{LabelValue: "compactor", SeriesCount: 200},
 							{LabelValue: "distributor", SeriesCount: 200},
 						},
@@ -367,8 +401,9 @@ func TestQuerierLabelValuesCardinality(t *testing.T) {
 			})
 
 			// Fetch label values cardinality.
-			lbValuesCardinalityResp, err := client.LabelValuesCardinality(tc.labelNames, tc.selector, tc.limit)
+			res, err := client.LabelValuesCardinality(tc.labelNames, tc.selector, tc.limit)
 			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, res.StatusCode)
 
 			// Ensure all ingesters have been invoked.
 			ingesters := []*e2emimir.MimirService{ingester1, ingester2, ingester3}
@@ -380,11 +415,15 @@ func TestQuerierLabelValuesCardinality(t *testing.T) {
 					e2e.WithLabelMatchers(labels.MustNewMatcher(labels.MatchEqual, "route", "/cortex.Ingester/LabelValuesCardinality"))))
 			}
 
+			// Test results.
+			var lbValuesCardinalityResp labelValuesCardinalityResponse
+			require.NoError(t, json.NewDecoder(res.Body).Decode(&lbValuesCardinalityResp))
+
 			// Make sure the resultant label names are sorted
 			sort.Slice(lbValuesCardinalityResp.Labels, func(l, r int) bool {
 				return lbValuesCardinalityResp.Labels[l].LabelName < lbValuesCardinalityResp.Labels[r].LabelName
 			})
-			require.Equal(t, tc.expectedResult, *lbValuesCardinalityResp)
+			require.Equal(t, tc.expectedResult, lbValuesCardinalityResp)
 		})
 	}
 }

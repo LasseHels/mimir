@@ -42,6 +42,8 @@ spec:
         runAsUser: 10001
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+        []
       containers:
         - name: gateway
           imagePullPolicy: IfNotPresent
@@ -80,6 +82,10 @@ spec:
             readOnlyRootFilesystem: true
           env:
           envFrom:
+      nodeSelector:
+        {}
+      affinity:
+        {}
       topologySpreadConstraints:
       - maxSkew: 1
         topologyKey: kubernetes.io/hostname
