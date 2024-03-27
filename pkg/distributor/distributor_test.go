@@ -44,6 +44,7 @@ import (
 	"github.com/prometheus/prometheus/scrape"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/twmb/franz-go/pkg/kfake"
 	"go.uber.org/atomic"
 	"golang.org/x/exp/slices"
 	"golang.org/x/time/rate"
@@ -56,16 +57,20 @@ import (
 	"github.com/grafana/mimir/pkg/ingester"
 	"github.com/grafana/mimir/pkg/ingester/client"
 	"github.com/grafana/mimir/pkg/mimirpb"
+	"github.com/grafana/mimir/pkg/querier/api"
 	"github.com/grafana/mimir/pkg/querier/stats"
 	"github.com/grafana/mimir/pkg/storage/chunk"
+	"github.com/grafana/mimir/pkg/storage/ingest"
 	"github.com/grafana/mimir/pkg/util/globalerror"
+	"github.com/grafana/mimir/pkg/util/limiter"
 	util_math "github.com/grafana/mimir/pkg/util/math"
 	util_test "github.com/grafana/mimir/pkg/util/test"
+	"github.com/grafana/mimir/pkg/util/testkafka"
 	"github.com/grafana/mimir/pkg/util/validation"
 )
 
 var (
-	errFail                    = httpgrpc.Errorf(http.StatusInternalServerError, "Fail")
+	errFail                    = status.Error(codes.Internal, "Fail")
 	emptyResponse              = &mimirpb.WriteResponse{}
 	generateTestHistogram      = util_test.GenerateTestHistogram
 	generateTestFloatHistogram = util_test.GenerateTestFloatHistogram
@@ -115,28 +120,24 @@ func TestDistributor_Push(t *testing.T) {
 
 	now := time.Now()
 	mtime.NowForce(now)
-	t.Cleanup(func() {
-		mtime.NowReset()
-	})
-
-	expErrFail := httpgrpc.Errorf(http.StatusInternalServerError, "failed pushing to ingester: Fail")
+	t.Cleanup(mtime.NowReset)
 
 	type samplesIn struct {
 		num              int
 		startTimestampMs int64
 	}
 	for name, tc := range map[string]struct {
-		metricNames          []string
-		numIngesters         int
-		happyIngesters       int
-		samples              samplesIn
-		metadata             int
-		expectedError        error
-		expectedGRPCError    *status.Status
-		expectedErrorDetails *mimirpb.ErrorDetails
-		expectedMetrics      string
-		timeOut              bool
-		configure            func(*Config)
+		metricNames           []string
+		numIngesters          int
+		happyIngesters        int
+		samples               samplesIn
+		metadata              int
+		expectedErrorContains []string
+		expectedGRPCError     *status.Status
+		expectedErrorDetails  *mimirpb.ErrorDetails
+		expectedMetrics       string
+		timeOut               bool
+		configure             func(*Config)
 	}{
 		"A push of no samples shouldn't block or return error, even if ingesters are sad": {
 			numIngesters:   3,
@@ -167,11 +168,11 @@ func TestDistributor_Push(t *testing.T) {
 			`,
 		},
 		"A push to 1 happy ingesters should fail": {
-			numIngesters:   3,
-			happyIngesters: 1,
-			samples:        samplesIn{num: 10, startTimestampMs: 123456789000},
-			expectedError:  expErrFail,
-			metricNames:    []string{lastSeenTimestamp},
+			numIngesters:          3,
+			happyIngesters:        1,
+			samples:               samplesIn{num: 10, startTimestampMs: 123456789000},
+			expectedErrorContains: []string{"Internal", "failed pushing to ingester"},
+			metricNames:           []string{lastSeenTimestamp},
 			expectedMetrics: `
 				# HELP cortex_distributor_latest_seen_sample_timestamp_seconds Unix timestamp of latest received sample per user.
 				# TYPE cortex_distributor_latest_seen_sample_timestamp_seconds gauge
@@ -179,11 +180,11 @@ func TestDistributor_Push(t *testing.T) {
 			`,
 		},
 		"A push to 0 happy ingesters should fail": {
-			numIngesters:   3,
-			happyIngesters: 0,
-			samples:        samplesIn{num: 10, startTimestampMs: 123456789000},
-			expectedError:  expErrFail,
-			metricNames:    []string{lastSeenTimestamp},
+			numIngesters:          3,
+			happyIngesters:        0,
+			samples:               samplesIn{num: 10, startTimestampMs: 123456789000},
+			expectedErrorContains: []string{"Internal", "failed pushing to ingester"},
+			metricNames:           []string{lastSeenTimestamp},
 			expectedMetrics: `
 				# HELP cortex_distributor_latest_seen_sample_timestamp_seconds Unix timestamp of latest received sample per user.
 				# TYPE cortex_distributor_latest_seen_sample_timestamp_seconds gauge
@@ -213,6 +214,9 @@ func TestDistributor_Push(t *testing.T) {
 			expectedMetrics: `
 				# HELP cortex_distributor_sample_delay_seconds Number of seconds by which a sample came in late wrt wallclock.
 				# TYPE cortex_distributor_sample_delay_seconds histogram
+				cortex_distributor_sample_delay_seconds_bucket{le="-60"} 0
+				cortex_distributor_sample_delay_seconds_bucket{le="-15"} 0
+				cortex_distributor_sample_delay_seconds_bucket{le="-5"} 0
 				cortex_distributor_sample_delay_seconds_bucket{le="30"} 0
 				cortex_distributor_sample_delay_seconds_bucket{le="60"} 0
 				cortex_distributor_sample_delay_seconds_bucket{le="120"} 0
@@ -239,6 +243,9 @@ func TestDistributor_Push(t *testing.T) {
 			expectedMetrics: `
 				# HELP cortex_distributor_sample_delay_seconds Number of seconds by which a sample came in late wrt wallclock.
 				# TYPE cortex_distributor_sample_delay_seconds histogram
+				cortex_distributor_sample_delay_seconds_bucket{le="-60"} 0
+				cortex_distributor_sample_delay_seconds_bucket{le="-15"} 0
+				cortex_distributor_sample_delay_seconds_bucket{le="-5"} 0
 				cortex_distributor_sample_delay_seconds_bucket{le="30"} 2
 				cortex_distributor_sample_delay_seconds_bucket{le="60"} 2
 				cortex_distributor_sample_delay_seconds_bucket{le="120"} 2
@@ -265,6 +272,9 @@ func TestDistributor_Push(t *testing.T) {
 			expectedMetrics: `
 				# HELP cortex_distributor_sample_delay_seconds Number of seconds by which a sample came in late wrt wallclock.
 				# TYPE cortex_distributor_sample_delay_seconds histogram
+				cortex_distributor_sample_delay_seconds_bucket{le="-60"} 0
+				cortex_distributor_sample_delay_seconds_bucket{le="-15"} 0
+				cortex_distributor_sample_delay_seconds_bucket{le="-5"} 0
 				cortex_distributor_sample_delay_seconds_bucket{le="30"} 0
 				cortex_distributor_sample_delay_seconds_bucket{le="60"} 0
 				cortex_distributor_sample_delay_seconds_bucket{le="120"} 0
@@ -282,13 +292,42 @@ func TestDistributor_Push(t *testing.T) {
 				cortex_distributor_sample_delay_seconds_count 0
 			`,
 		},
-		"A timed out push should fail": {
+		"A push to ingesters with samples that have timestamps which are in the future relative to wall clock time should be tracked correctly": {
 			numIngesters:   3,
-			happyIngesters: 3,
-			samples:        samplesIn{num: 10, startTimestampMs: 123456789000},
-			timeOut:        true,
-			expectedError:  errors.New("exceeded configured distributor remote timeout: failed pushing to ingester: context deadline exceeded"),
-			metricNames:    []string{lastSeenTimestamp},
+			happyIngesters: 2,
+			samples:        samplesIn{num: 1, startTimestampMs: now.UnixMilli() + 17*1000},
+			metadata:       1,
+			metricNames:    []string{distributorSampleDelay},
+			expectedMetrics: `
+				# HELP cortex_distributor_sample_delay_seconds Number of seconds by which a sample came in late wrt wallclock.
+				# TYPE cortex_distributor_sample_delay_seconds histogram
+				cortex_distributor_sample_delay_seconds_bucket{le="-60"} 0
+				cortex_distributor_sample_delay_seconds_bucket{le="-15"} 2
+				cortex_distributor_sample_delay_seconds_bucket{le="-5"} 2
+				cortex_distributor_sample_delay_seconds_bucket{le="30"} 2
+				cortex_distributor_sample_delay_seconds_bucket{le="60"} 2
+				cortex_distributor_sample_delay_seconds_bucket{le="120"} 2
+				cortex_distributor_sample_delay_seconds_bucket{le="240"} 2
+				cortex_distributor_sample_delay_seconds_bucket{le="480"} 2
+				cortex_distributor_sample_delay_seconds_bucket{le="600"} 2
+				cortex_distributor_sample_delay_seconds_bucket{le="1800"} 2
+				cortex_distributor_sample_delay_seconds_bucket{le="3600"} 2
+				cortex_distributor_sample_delay_seconds_bucket{le="7200"} 2
+				cortex_distributor_sample_delay_seconds_bucket{le="10800"} 2
+				cortex_distributor_sample_delay_seconds_bucket{le="21600"} 2
+				cortex_distributor_sample_delay_seconds_bucket{le="86400"} 2
+				cortex_distributor_sample_delay_seconds_bucket{le="+Inf"} 2
+				cortex_distributor_sample_delay_seconds_sum -34
+				cortex_distributor_sample_delay_seconds_count 2
+			`,
+		},
+		"A timed out push should fail": {
+			numIngesters:          3,
+			happyIngesters:        3,
+			samples:               samplesIn{num: 10, startTimestampMs: 123456789000},
+			timeOut:               true,
+			expectedErrorContains: []string{"exceeded configured distributor remote timeout", "failed pushing to ingester", "context deadline exceeded"},
+			metricNames:           []string{lastSeenTimestamp},
 			expectedMetrics: `
 				# HELP cortex_distributor_latest_seen_sample_timestamp_seconds Unix timestamp of latest received sample per user.
 				# TYPE cortex_distributor_latest_seen_sample_timestamp_seconds gauge
@@ -313,12 +352,11 @@ func TestDistributor_Push(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			limits := &validation.Limits{}
-			flagext.DefaultValues(limits)
+			limits := prepareDefaultLimits()
 			limits.IngestionRate = 20
 			limits.IngestionBurstSize = 20
 
-			ds, _, regs := prepare(t, prepConfig{
+			ds, _, regs, _ := prepare(t, prepConfig{
 				numIngesters:    tc.numIngesters,
 				happyIngesters:  tc.happyIngesters,
 				numDistributors: 1,
@@ -327,17 +365,19 @@ func TestDistributor_Push(t *testing.T) {
 				configure:       tc.configure,
 			})
 
-			request := makeWriteRequest(tc.samples.startTimestampMs, tc.samples.num, tc.metadata, false, true)
+			request := makeWriteRequest(tc.samples.startTimestampMs, tc.samples.num, tc.metadata, false, true, "foo")
 			response, err := ds[0].Push(ctx, request)
 
-			if tc.expectedError == nil && tc.expectedGRPCError == nil {
+			if tc.expectedErrorContains == nil && tc.expectedGRPCError == nil {
 				require.NoError(t, err)
 				assert.Equal(t, emptyResponse, response)
 			} else {
 				assert.Nil(t, response)
 
 				if tc.expectedGRPCError == nil {
-					assert.EqualError(t, err, tc.expectedError.Error())
+					for _, msg := range tc.expectedErrorContains {
+						assert.ErrorContains(t, err, msg)
+					}
 				} else {
 					checkGRPCError(t, tc.expectedGRPCError, tc.expectedErrorDetails, err)
 				}
@@ -357,12 +397,11 @@ func TestDistributor_Push(t *testing.T) {
 }
 
 func TestDistributor_PushWithDoBatchWorkers(t *testing.T) {
-	limits := &validation.Limits{}
-	flagext.DefaultValues(limits)
+	limits := prepareDefaultLimits()
 	limits.IngestionRate = 20
 	limits.IngestionBurstSize = 20
 
-	ds, _, _ := prepare(t, prepConfig{
+	ds, _, _, _ := prepare(t, prepConfig{
 		numIngesters:    3,
 		happyIngesters:  3,
 		numDistributors: 1,
@@ -375,15 +414,15 @@ func TestDistributor_PushWithDoBatchWorkers(t *testing.T) {
 	require.Len(t, ds, 1)
 	distributor := ds[0]
 
-	require.NotNil(t, distributor.ingesterDoBatchPushWorkers)
+	require.NotNil(t, distributor.doBatchPushWorkers)
 	counter := atomic.NewInt64(0)
-	originalIngesterDoBatchPushWorkers := distributor.ingesterDoBatchPushWorkers
-	distributor.ingesterDoBatchPushWorkers = func(f func()) {
+	originalIngesterDoBatchPushWorkers := distributor.doBatchPushWorkers
+	distributor.doBatchPushWorkers = func(f func()) {
 		counter.Inc()
 		originalIngesterDoBatchPushWorkers(f)
 	}
 
-	request := makeWriteRequest(123456789000, 3, 5, false, false)
+	request := makeWriteRequest(123456789000, 3, 5, false, false, "foo")
 	ctx := user.InjectOrgID(context.Background(), "user")
 	response, err := distributor.Push(ctx, request)
 
@@ -397,31 +436,31 @@ func TestDistributor_ContextCanceledRequest(t *testing.T) {
 	mtime.NowForce(now)
 	t.Cleanup(mtime.NowReset)
 
-	ds, ings, _ := prepare(t, prepConfig{
+	ds, ings, _, _ := prepare(t, prepConfig{
 		numIngesters:    3,
 		happyIngesters:  3,
 		numDistributors: 1,
 	})
 
 	// Lock all mockIngester instances, so they will be waiting
-	for i := range ings {
-		ings[i].Lock()
+	for _, ing := range ings {
+		ing.Lock()
 		defer func(ing *mockIngester) {
 			ing.Unlock()
-		}(&ings[i])
+		}(ing)
 	}
 
 	ctx := user.InjectOrgID(context.Background(), "user")
 	ctx, cancel := context.WithCancel(ctx)
 	cancel()
-	request := makeWriteRequest(123456789000, 1, 1, false, true)
+	request := makeWriteRequest(123456789000, 1, 1, false, true, "foo")
 	_, err := ds[0].Push(ctx, request)
 	require.Error(t, err)
 	require.ErrorIs(t, err, context.Canceled)
 }
 
 func TestDistributor_MetricsCleanup(t *testing.T) {
-	dists, _, regs := prepare(t, prepConfig{
+	dists, _, regs, _ := prepare(t, prepConfig{
 		numDistributors: 1,
 	})
 	d := dists[0]
@@ -590,14 +629,13 @@ func TestDistributor_PushRequestRateLimiter(t *testing.T) {
 		testData := testData
 
 		t.Run(testName, func(t *testing.T) {
-			limits := &validation.Limits{}
-			flagext.DefaultValues(limits)
+			limits := prepareDefaultLimits()
 			limits.RequestRate = testData.requestRate
 			limits.RequestBurstSize = testData.requestBurstSize
 			limits.ServiceOverloadStatusCodeOnRateLimitEnabled = testData.enableServiceOverloadError
 
 			// Start all expected distributors
-			distributors, _, _ := prepare(t, prepConfig{
+			distributors, _, _, _ := prepare(t, prepConfig{
 				numIngesters:    3,
 				happyIngesters:  3,
 				numDistributors: testData.distributors,
@@ -606,7 +644,7 @@ func TestDistributor_PushRequestRateLimiter(t *testing.T) {
 
 			// Send multiple requests to the first distributor
 			for _, push := range testData.pushes {
-				request := makeWriteRequest(0, 1, 1, false, true)
+				request := makeWriteRequest(0, 1, 1, false, true, "foo")
 				response, err := distributors[0].Push(ctx, request)
 
 				if push.expectedError == nil {
@@ -630,15 +668,17 @@ func TestDistributor_PushIngestionRateLimiter(t *testing.T) {
 
 	ctx := user.InjectOrgID(context.Background(), "user")
 	tests := map[string]struct {
-		distributors       int
-		ingestionRate      float64
-		ingestionBurstSize int
-		pushes             []testPush
+		distributors         int
+		ingestionRate        float64
+		ingestionBurstSize   int
+		ingestionBurstFactor float64
+		pushes               []testPush
 	}{
 		"evenly share the ingestion limit across distributors": {
-			distributors:       2,
-			ingestionRate:      10,
-			ingestionBurstSize: 5,
+			distributors:         2,
+			ingestionRate:        10,
+			ingestionBurstSize:   5,
+			ingestionBurstFactor: 0,
 			pushes: []testPush{
 				{samples: 2, expectedError: nil},
 				{samples: 1, expectedError: nil},
@@ -649,9 +689,10 @@ func TestDistributor_PushIngestionRateLimiter(t *testing.T) {
 			},
 		},
 		"for each distributor, set an ingestion burst limit.": {
-			distributors:       2,
-			ingestionRate:      10,
-			ingestionBurstSize: 20,
+			distributors:         2,
+			ingestionRate:        10,
+			ingestionBurstSize:   20,
+			ingestionBurstFactor: 0,
 			pushes: []testPush{
 				{samples: 10, expectedError: nil},
 				{samples: 5, expectedError: nil},
@@ -659,6 +700,32 @@ func TestDistributor_PushIngestionRateLimiter(t *testing.T) {
 				{samples: 5, expectedError: nil},
 				{samples: 1, expectedError: status.New(codes.ResourceExhausted, newIngestionRateLimitedError(10, 20).Error())},
 				{metadata: 1, expectedError: status.New(codes.ResourceExhausted, newIngestionRateLimitedError(10, 20).Error())},
+			},
+		},
+		"evenly share the ingestion burst limit across distributors": {
+			distributors:         2,
+			ingestionRate:        10,
+			ingestionBurstFactor: 4,
+			// This is equivalent to the test above because the ingestion rate and burst are per distributor with the burst factor meaning the burst would be:
+			// (10 (ingest rate) / 2 (number of distributors)) * 4 (burst factor)= 20 burst per distributor
+			pushes: []testPush{
+				{samples: 10, expectedError: nil},
+				{samples: 5, expectedError: nil},
+				{samples: 5, metadata: 1, expectedError: status.New(codes.ResourceExhausted, newIngestionRateLimitedError(10, 40).Error())},
+				{samples: 5, expectedError: nil},
+				{samples: 1, expectedError: status.New(codes.ResourceExhausted, newIngestionRateLimitedError(10, 40).Error())},
+				{metadata: 1, expectedError: status.New(codes.ResourceExhausted, newIngestionRateLimitedError(10, 40).Error())},
+			},
+		},
+		"Test burstFactor burst limit in one burst": {
+			distributors:         2,
+			ingestionRate:        10,
+			ingestionBurstFactor: 2,
+			pushes: []testPush{
+				// Burst is 10 for the distributor (10/2)*2 = 10
+				{samples: 10, expectedError: nil},
+				// We've drained the pool so this should fail until the bucket re-fills in a few seconds
+				{samples: 1, metadata: 1, expectedError: status.New(codes.ResourceExhausted, newIngestionRateLimitedError(10, 20).Error())},
 			},
 		},
 	}
@@ -669,29 +736,29 @@ func TestDistributor_PushIngestionRateLimiter(t *testing.T) {
 		testData := testData
 
 		t.Run(testName, func(t *testing.T) {
-			limits := &validation.Limits{}
-			flagext.DefaultValues(limits)
+			limits := prepareDefaultLimits()
 			limits.IngestionRate = testData.ingestionRate
 			limits.IngestionBurstSize = testData.ingestionBurstSize
+			limits.IngestionBurstFactor = testData.ingestionBurstFactor
 
 			// Start all expected distributors
-			distributors, _, _ := prepare(t, prepConfig{
+			distributors, _, _, _ := prepare(t, prepConfig{
 				numIngesters:    3,
 				happyIngesters:  3,
 				numDistributors: testData.distributors,
 				limits:          limits,
 			})
 
-			// Push samples in multiple requests to the first distributor
+			// Push samples in multiple requests to only the first distributor
 			for _, push := range testData.pushes {
-				request := makeWriteRequest(0, push.samples, push.metadata, false, false)
+				request := makeWriteRequest(0, push.samples, push.metadata, false, false, "foo")
 				response, err := distributors[0].Push(ctx, request)
 
 				if push.expectedError == nil {
-					assert.Equal(t, emptyResponse, response)
+					assert.Equal(t, emptyResponse, response, "Received error when a successful write was expected.")
 					assert.Nil(t, err)
 				} else {
-					assert.Nil(t, response)
+					assert.Nil(t, response, "Received successful write response when an error was expected.")
 					checkGRPCError(t, push.expectedError, expectedErrorDetails, err)
 				}
 			}
@@ -841,11 +908,10 @@ func TestDistributor_PushInstanceLimits(t *testing.T) {
 		testData := testData
 
 		t.Run(testName, func(t *testing.T) {
-			limits := &validation.Limits{}
-			flagext.DefaultValues(limits)
+			limits := prepareDefaultLimits()
 
 			// Start all expected distributors
-			distributors, _, regs := prepare(t, prepConfig{
+			distributors, _, regs, _ := prepare(t, prepConfig{
 				numIngesters:    3,
 				happyIngesters:  3,
 				numDistributors: 1,
@@ -864,7 +930,7 @@ func TestDistributor_PushInstanceLimits(t *testing.T) {
 			d.ingestionRate.Tick()
 
 			for _, push := range testData.pushes {
-				request := makeWriteRequest(0, push.samples, push.metadata, false, false)
+				request := makeWriteRequest(0, push.samples, push.metadata, false, false, "foo")
 				resp, err := d.Push(ctx, request)
 
 				if push.expectedError == nil {
@@ -938,7 +1004,7 @@ func TestDistributor_PushHAInstances(t *testing.T) {
 			testReplica:     "instance1234567890123456789012345678901234567890",
 			cluster:         "cluster0",
 			samples:         5,
-			expectedError:   status.New(codes.FailedPrecondition, fmt.Sprintf(labelValueTooLongMsgFormat, "instance1234567890123456789012345678901234567890", formatLabelSet(labelSetGenWithReplicaAndCluster("instance1234567890123456789012345678901234567890", "cluster0")(0)))),
+			expectedError:   status.New(codes.FailedPrecondition, fmt.Sprintf(labelValueTooLongMsgFormat, "instance1234567890123456789012345678901234567890", mimirpb.FromLabelAdaptersToString(labelSetGenWithReplicaAndCluster("instance1234567890123456789012345678901234567890", "cluster0")(0)))),
 			expectedDetails: &mimirpb.ErrorDetails{Cause: mimirpb.BAD_DATA},
 		},
 	} {
@@ -948,7 +1014,7 @@ func TestDistributor_PushHAInstances(t *testing.T) {
 			limits.AcceptHASamples = true
 			limits.MaxLabelValueLength = 15
 
-			ds, _, _ := prepare(t, prepConfig{
+			ds, _, _, _ := prepare(t, prepConfig{
 				numIngesters:    3,
 				happyIngesters:  3,
 				numDistributors: 1,
@@ -974,9 +1040,24 @@ func TestDistributor_PushHAInstances(t *testing.T) {
 	}
 }
 
-func TestDistributor_PushQuery(t *testing.T) {
+func TestDistributor_PushWithCircuitBreakers(t *testing.T) {
+	ds, _, _, _ := prepare(t, prepConfig{
+		numIngesters:       3,
+		happyIngesters:     3,
+		numDistributors:    1,
+		circuitBreakerOpen: true,
+	})
+
 	ctx := user.InjectOrgID(context.Background(), "user")
-	nameMatcher := mustEqualMatcher(model.MetricNameLabel, "foo")
+	err := ds[0].push(ctx, NewParsedRequest(makeWriteRequest(123456789000, 10, 0, false, true, "foo")))
+	require.Error(t, err)
+	require.ErrorAs(t, err, &circuitBreakerOpenError{})
+}
+
+func TestDistributor_PushQuery(t *testing.T) {
+	const metricName = "foo"
+	ctx := user.InjectOrgID(context.Background(), "user")
+	nameMatcher := mustEqualMatcher(model.MetricNameLabel, metricName)
 	barMatcher := mustEqualMatcher("bar", "baz")
 
 	type testcase struct {
@@ -1045,7 +1126,7 @@ func TestDistributor_PushQuery(t *testing.T) {
 					happyIngesters:    happyIngesters,
 					samples:           10,
 					matchers:          []*labels.Matcher{nameMatcher, barMatcher},
-					expectedResponse:  expectedResponse(0, 10, true),
+					expectedResponse:  expectedResponse(0, 10, true, metricName),
 					expectedIngesters: expectedIngesters,
 					shuffleShardSize:  shuffleShardSize,
 				})
@@ -1057,7 +1138,7 @@ func TestDistributor_PushQuery(t *testing.T) {
 					happyIngesters:    happyIngesters,
 					samples:           10,
 					matchers:          []*labels.Matcher{nameMatcher, mustEqualMatcher("not", "found")},
-					expectedResponse:  expectedResponse(0, 0, true),
+					expectedResponse:  expectedResponse(0, 0, true, metricName),
 					expectedIngesters: expectedIngesters,
 					shuffleShardSize:  shuffleShardSize,
 				})
@@ -1070,7 +1151,7 @@ func TestDistributor_PushQuery(t *testing.T) {
 						happyIngesters:    happyIngesters,
 						samples:           10,
 						matchers:          []*labels.Matcher{nameMatcher, mustEqualMatcher("sample", strconv.Itoa(i))},
-						expectedResponse:  expectedResponse(i, i+1, true),
+						expectedResponse:  expectedResponse(i, i+1, true, metricName),
 						expectedIngesters: expectedIngesters,
 						shuffleShardSize:  shuffleShardSize,
 					})
@@ -1093,9 +1174,9 @@ func TestDistributor_PushQuery(t *testing.T) {
 
 			cfg.shuffleShardSize = tc.shuffleShardSize
 
-			ds, ingesters, reg := prepare(t, cfg)
+			ds, ingesters, reg, _ := prepare(t, cfg)
 
-			request := makeWriteRequest(0, tc.samples, tc.metadata, false, true)
+			request := makeWriteRequest(0, tc.samples, tc.metadata, false, true, metricName)
 			writeResponse, err := ds[0].Push(ctx, request)
 			assert.Equal(t, &mimirpb.WriteResponse{}, writeResponse)
 			assert.Nil(t, err)
@@ -1109,13 +1190,13 @@ func TestDistributor_PushQuery(t *testing.T) {
 				assert.EqualError(t, err, tc.expectedError.Error())
 
 				// Assert that downstream gRPC statuses are passed back upstream
-				_, ok := httpgrpc.HTTPResponseFromError(err)
-				assert.True(t, ok, fmt.Sprintf("expected error to be an httpgrpc error, but got: %T", err))
+				_, ok := grpcutil.ErrorToStatus(err)
+				assert.True(t, ok, fmt.Sprintf("expected error to be a status error, but got: %T", err))
 			}
 
 			var m model.Matrix
 			if len(resp.Chunkseries) == 0 {
-				m, err = client.TimeSeriesChunksToMatrix(0, 10, nil)
+				m, err = client.StreamingSeriesToMatrix(0, 10, resp.StreamingSeries)
 			} else {
 				m, err = client.TimeSeriesChunksToMatrix(0, 10, resp.Chunkseries)
 			}
@@ -1127,7 +1208,7 @@ func TestDistributor_PushQuery(t *testing.T) {
 			// if all other ones are successful, so we're good either has been queried X or X-1
 			// ingesters.
 			if tc.expectedError == nil {
-				assert.Contains(t, []int{tc.expectedIngesters, tc.expectedIngesters - 1}, countMockIngestersCalls(ingesters, "QueryStream"))
+				assert.Contains(t, []int{tc.expectedIngesters, tc.expectedIngesters - 1}, countMockIngestersCalled(ingesters, "QueryStream"))
 			}
 		})
 	}
@@ -1191,7 +1272,7 @@ func TestDistributor_Push_LabelRemoval(t *testing.T) {
 		limits.DropLabels = tc.removeLabels
 		limits.AcceptHASamples = tc.removeReplica
 
-		ds, ingesters, _ := prepare(t, prepConfig{
+		ds, ingesters, _, _ := prepare(t, prepConfig{
 			numIngesters:    2,
 			happyIngesters:  2,
 			numDistributors: 1,
@@ -1258,7 +1339,7 @@ func TestDistributor_Push_ShouldGuaranteeShardingTokenConsistencyOverTheTime(t *
 
 	for testName, testData := range tests {
 		t.Run(testName, func(t *testing.T) {
-			ds, ingesters, _ := prepare(t, prepConfig{
+			ds, ingesters, _, _ := prepare(t, prepConfig{
 				numIngesters:    2,
 				happyIngesters:  2,
 				numDistributors: 1,
@@ -1314,7 +1395,7 @@ func TestDistributor_Push_LabelNameValidation(t *testing.T) {
 
 	for testName, tc := range tests {
 		t.Run(testName, func(t *testing.T) {
-			ds, _, _ := prepare(t, prepConfig{
+			ds, _, _, _ := prepare(t, prepConfig{
 				numIngesters:     2,
 				happyIngesters:   2,
 				numDistributors:  1,
@@ -1327,7 +1408,7 @@ func TestDistributor_Push_LabelNameValidation(t *testing.T) {
 			req.SkipLabelNameValidation = tc.skipLabelNameValidationReq
 			_, err := ds[0].Push(ctx, req)
 			if tc.errExpected {
-				fromError, _ := status.FromError(err)
+				fromError, _ := grpcutil.ErrorToStatus(err)
 				assert.Equal(t, tc.errMessage, fromError.Message())
 			} else {
 				assert.Nil(t, err)
@@ -1353,17 +1434,17 @@ func TestDistributor_Push_ExemplarValidation(t *testing.T) {
 		},
 		"rejects exemplar with no labels": {
 			req:    makeWriteRequestExemplar([]string{model.MetricNameLabel, "test"}, 1000, []string{}),
-			errMsg: `received an exemplar with no valid labels, timestamp: 1000 series: {__name__="test"} labels: {}`,
+			errMsg: `received an exemplar with no valid labels, timestamp: 1000 series: test labels: {}`,
 			errID:  globalerror.ExemplarLabelsMissing,
 		},
 		"rejects exemplar with no timestamp": {
 			req:    makeWriteRequestExemplar([]string{model.MetricNameLabel, "test"}, 0, []string{"foo", "bar"}),
-			errMsg: `received an exemplar with no timestamp, timestamp: 0 series: {__name__="test"} labels: {foo="bar"}`,
+			errMsg: `received an exemplar with no timestamp, timestamp: 0 series: test labels: {foo="bar"}`,
 			errID:  globalerror.ExemplarTimestampInvalid,
 		},
 		"rejects exemplar with too long labelset": {
 			req:    makeWriteRequestExemplar([]string{model.MetricNameLabel, "test"}, 1000, []string{"foo", strings.Repeat("0", 126)}),
-			errMsg: fmt.Sprintf(`received an exemplar where the size of its combined labels exceeds the limit of 128 characters, timestamp: 1000 series: {__name__="test"} labels: {foo="%s"}`, strings.Repeat("0", 126)),
+			errMsg: fmt.Sprintf(`received an exemplar where the size of its combined labels exceeds the limit of 128 characters, timestamp: 1000 series: test labels: {foo="%s"}`, strings.Repeat("0", 126)),
 			errID:  globalerror.ExemplarLabelsTooLong,
 		},
 		"rejects exemplar with too many series labels": {
@@ -1385,10 +1466,9 @@ func TestDistributor_Push_ExemplarValidation(t *testing.T) {
 
 	for testName, tc := range tests {
 		t.Run(testName, func(t *testing.T) {
-			limits := &validation.Limits{}
-			flagext.DefaultValues(limits)
+			limits := prepareDefaultLimits()
 			limits.MaxGlobalExemplarsPerUser = 10
-			ds, _, _ := prepare(t, prepConfig{
+			ds, _, _, _ := prepare(t, prepConfig{
 				limits:           limits,
 				numIngesters:     2,
 				happyIngesters:   2,
@@ -1397,7 +1477,7 @@ func TestDistributor_Push_ExemplarValidation(t *testing.T) {
 			})
 			_, err := ds[0].Push(ctx, tc.req)
 			if tc.errMsg != "" {
-				fromError, _ := status.FromError(err)
+				fromError, _ := grpcutil.ErrorToStatus(err)
 				assert.Contains(t, fromError.Message(), tc.errMsg)
 				assert.Contains(t, fromError.Message(), tc.errID)
 			} else {
@@ -1444,7 +1524,7 @@ func TestDistributor_Push_HistogramValidation(t *testing.T) {
 			bucketLimit: 7,
 			errMsg:      "received a native histogram sample with too many buckets, timestamp",
 			errID:       globalerror.MaxNativeHistogramBuckets,
-			expectedErr: status.New(codes.FailedPrecondition, fmt.Sprintf(maxNativeHistogramBucketsMsgFormat, 1000, "{__name__=\"test\"}", 8, 7)),
+			expectedErr: status.New(codes.FailedPrecondition, fmt.Sprintf(maxNativeHistogramBucketsMsgFormat, 1000, "test", 8, 7)),
 		},
 	}
 
@@ -1452,13 +1532,12 @@ func TestDistributor_Push_HistogramValidation(t *testing.T) {
 
 	for testName, tc := range tests {
 		t.Run(testName, func(t *testing.T) {
-			limits := &validation.Limits{}
-			flagext.DefaultValues(limits)
+			limits := prepareDefaultLimits()
 			limits.CreationGracePeriod = model.Duration(time.Minute)
 			limits.MaxNativeHistogramBuckets = tc.bucketLimit
 			limits.ReduceNativeHistogramOverMaxBuckets = false
 
-			ds, _, _ := prepare(t, prepConfig{
+			ds, _, _, _ := prepare(t, prepConfig{
 				numIngesters:     2,
 				happyIngesters:   2,
 				numDistributors:  1,
@@ -1475,10 +1554,6 @@ func TestDistributor_Push_HistogramValidation(t *testing.T) {
 				assert.Nil(t, resp)
 				checkGRPCError(t, tc.expectedErr, expectedDetails, err)
 			}
-
-			t.Cleanup(func() {
-				require.NoError(t, services.StopAndAwaitTerminated(ctx, ds[0]))
-			})
 		})
 	}
 }
@@ -1498,9 +1573,9 @@ func TestDistributor_ExemplarValidation(t *testing.T) {
 			},
 			minExemplarTS: 0,
 			maxExemplarTS: 0,
-			req: &mimirpb.WriteRequest{Timeseries: []mimirpb.PreallocTimeseries{
+			req: makeWriteRequestWith(
 				makeExemplarTimeseries([]string{model.MetricNameLabel, "test1"}, 1000, []string{"foo", "bar"}),
-			}},
+			),
 			expectedExemplars: []mimirpb.PreallocTimeseries{
 				{TimeSeries: &mimirpb.TimeSeries{
 					Labels:    []mimirpb.LabelAdapter{{Name: model.MetricNameLabel, Value: "test1"}},
@@ -1514,10 +1589,10 @@ func TestDistributor_ExemplarValidation(t *testing.T) {
 			},
 			minExemplarTS: 0,
 			maxExemplarTS: math.MaxInt64,
-			req: &mimirpb.WriteRequest{Timeseries: []mimirpb.PreallocTimeseries{
+			req: makeWriteRequestWith(
 				makeExemplarTimeseries([]string{model.MetricNameLabel, "test1"}, 1000, []string{"foo", "bar"}),
 				makeExemplarTimeseries([]string{model.MetricNameLabel, "test2"}, 1000, []string{"foo", "bar"}),
-			}},
+			),
 			expectedExemplars: []mimirpb.PreallocTimeseries{
 				makeExemplarTimeseries([]string{model.MetricNameLabel, "test1"}, 1000, []string{"foo", "bar"}),
 				makeExemplarTimeseries([]string{model.MetricNameLabel, "test2"}, 1000, []string{"foo", "bar"}),
@@ -1529,10 +1604,10 @@ func TestDistributor_ExemplarValidation(t *testing.T) {
 			},
 			minExemplarTS: 300000,
 			maxExemplarTS: math.MaxInt64,
-			req: &mimirpb.WriteRequest{Timeseries: []mimirpb.PreallocTimeseries{
+			req: makeWriteRequestWith(
 				makeExemplarTimeseries([]string{model.MetricNameLabel, "test"}, 1000, []string{"foo", "bar"}),
 				makeExemplarTimeseries([]string{model.MetricNameLabel, "test"}, 601000, []string{"foo", "bar"}),
-			}},
+			),
 			expectedExemplars: []mimirpb.PreallocTimeseries{
 				{TimeSeries: &mimirpb.TimeSeries{
 					Labels:    []mimirpb.LabelAdapter{{Name: model.MetricNameLabel, Value: "test"}},
@@ -1552,17 +1627,15 @@ func TestDistributor_ExemplarValidation(t *testing.T) {
 			},
 			minExemplarTS: 300000,
 			maxExemplarTS: math.MaxInt64,
-			req: &mimirpb.WriteRequest{Timeseries: []mimirpb.PreallocTimeseries{
-				{
-					TimeSeries: &mimirpb.TimeSeries{
-						Labels: []mimirpb.LabelAdapter{{Name: model.MetricNameLabel, Value: "test"}},
-						Exemplars: []mimirpb.Exemplar{
-							{Labels: []mimirpb.LabelAdapter{{Name: "foo", Value: "bar1"}}, TimestampMs: 1000},
-							{Labels: []mimirpb.LabelAdapter{{Name: "foo", Value: "bar2"}}, TimestampMs: 601000},
-						},
+			req: makeWriteRequestWith(mimirpb.PreallocTimeseries{
+				TimeSeries: &mimirpb.TimeSeries{
+					Labels: []mimirpb.LabelAdapter{{Name: model.MetricNameLabel, Value: "test"}},
+					Exemplars: []mimirpb.Exemplar{
+						{Labels: []mimirpb.LabelAdapter{{Name: "foo", Value: "bar1"}}, TimestampMs: 1000},
+						{Labels: []mimirpb.LabelAdapter{{Name: "foo", Value: "bar2"}}, TimestampMs: 601000},
 					},
 				},
-			}},
+			}),
 			expectedExemplars: []mimirpb.PreallocTimeseries{
 				{
 					TimeSeries: &mimirpb.TimeSeries{
@@ -1585,17 +1658,15 @@ func TestDistributor_ExemplarValidation(t *testing.T) {
 			},
 			minExemplarTS: 300000,
 			maxExemplarTS: math.MaxInt64,
-			req: &mimirpb.WriteRequest{Timeseries: []mimirpb.PreallocTimeseries{
-				{
-					TimeSeries: &mimirpb.TimeSeries{
-						Labels: []mimirpb.LabelAdapter{{Name: model.MetricNameLabel, Value: "test"}},
-						Exemplars: []mimirpb.Exemplar{
-							{Labels: []mimirpb.LabelAdapter{{Name: "foo", Value: "bar1"}}, TimestampMs: 1000},
-							{Labels: []mimirpb.LabelAdapter{{Name: "foo", Value: "bar2"}}, TimestampMs: 601000},
-						},
+			req: makeWriteRequestWith(mimirpb.PreallocTimeseries{
+				TimeSeries: &mimirpb.TimeSeries{
+					Labels: []mimirpb.LabelAdapter{{Name: model.MetricNameLabel, Value: "test"}},
+					Exemplars: []mimirpb.Exemplar{
+						{Labels: []mimirpb.LabelAdapter{{Name: "foo", Value: "bar1"}}, TimestampMs: 1000},
+						{Labels: []mimirpb.LabelAdapter{{Name: "foo", Value: "bar2"}}, TimestampMs: 601000},
 					},
 				},
-			}},
+			}),
 			expectedExemplars: []mimirpb.PreallocTimeseries{
 				{
 					TimeSeries: &mimirpb.TimeSeries{
@@ -1618,17 +1689,15 @@ func TestDistributor_ExemplarValidation(t *testing.T) {
 			},
 			minExemplarTS: 0,
 			maxExemplarTS: 100000,
-			req: &mimirpb.WriteRequest{Timeseries: []mimirpb.PreallocTimeseries{
-				{
-					TimeSeries: &mimirpb.TimeSeries{
-						Labels: []mimirpb.LabelAdapter{{Name: model.MetricNameLabel, Value: "test"}},
-						Exemplars: []mimirpb.Exemplar{
-							{Labels: []mimirpb.LabelAdapter{{Name: "foo", Value: "bar1"}}, TimestampMs: 1000},
-							{Labels: []mimirpb.LabelAdapter{{Name: "foo", Value: "bar2"}}, TimestampMs: 601000},
-						},
+			req: makeWriteRequestWith(mimirpb.PreallocTimeseries{
+				TimeSeries: &mimirpb.TimeSeries{
+					Labels: []mimirpb.LabelAdapter{{Name: model.MetricNameLabel, Value: "test"}},
+					Exemplars: []mimirpb.Exemplar{
+						{Labels: []mimirpb.LabelAdapter{{Name: "foo", Value: "bar1"}}, TimestampMs: 1000},
+						{Labels: []mimirpb.LabelAdapter{{Name: "foo", Value: "bar2"}}, TimestampMs: 601000},
 					},
 				},
-			}},
+			}),
 			expectedExemplars: []mimirpb.PreallocTimeseries{
 				{
 					TimeSeries: &mimirpb.TimeSeries{
@@ -1649,10 +1718,9 @@ func TestDistributor_ExemplarValidation(t *testing.T) {
 	now := mtime.Now()
 	for testName, tc := range tests {
 		t.Run(testName, func(t *testing.T) {
-			limits := &validation.Limits{}
-			flagext.DefaultValues(limits)
+			limits := prepareDefaultLimits()
 			tc.prepareConfig(limits)
-			ds, _, regs := prepare(t, prepConfig{
+			ds, _, regs, _ := prepare(t, prepConfig{
 				limits:          limits,
 				numDistributors: 1,
 			})
@@ -1749,18 +1817,17 @@ func TestDistributor_HistogramReduction(t *testing.T) {
 				limits.MaxNativeHistogramBuckets = 1
 			},
 			req:                makeWriteRequestHistogram([]string{model.MetricNameLabel, "test"}, 1000, hugeH),
-			expectedError:      fmt.Errorf("received a native histogram sample with too many buckets and cannot reduce, timestamp: 1000 series: {__name__=\"test\"}, buckets: 2, limit: 1 (not-reducible-native-histogram)"),
+			expectedError:      fmt.Errorf("received a native histogram sample with too many buckets and cannot reduce, timestamp: 1000 series: test, buckets: 2, limit: 1 (not-reducible-native-histogram)"),
 			expectedTimeSeries: []mimirpb.PreallocTimeseries{},
 		},
 	}
 	now := mtime.Now()
 	for testName, tc := range tests {
 		t.Run(testName, func(t *testing.T) {
-			limits := &validation.Limits{}
-			flagext.DefaultValues(limits)
+			limits := prepareDefaultLimits()
 			tc.prepareConfig(limits)
 			limits.ReduceNativeHistogramOverMaxBuckets = true
-			ds, _, regs := prepare(t, prepConfig{
+			ds, _, regs, _ := prepare(t, prepConfig{
 				limits:          limits,
 				numDistributors: 1,
 			})
@@ -1878,7 +1945,7 @@ func BenchmarkDistributor_Push(b *testing.B) {
 		},
 		"max label name length limit reached": {
 			prepareConfig: func(limits *validation.Limits) {
-				limits.MaxLabelNameLength = 1024
+				limits.MaxLabelNameLength = 200
 			},
 			prepareSeries: func() ([][]mimirpb.LabelAdapter, []mimirpb.Sample) {
 				metrics := make([][]mimirpb.LabelAdapter, numSeriesPerRequest)
@@ -1886,7 +1953,7 @@ func BenchmarkDistributor_Push(b *testing.B) {
 
 				for i := 0; i < numSeriesPerRequest; i++ {
 					// Add a label with a very long name.
-					metrics[i] = mkLabels(10, fmt.Sprintf("xxx_%0.2000d", 1), "xxx")
+					metrics[i] = mkLabels(10, fmt.Sprintf("xxx_%0.200d", 1), "xxx")
 					samples[i] = mimirpb.Sample{
 						Value:       float64(i),
 						TimestampMs: time.Now().UnixNano() / int64(time.Millisecond),
@@ -1899,7 +1966,7 @@ func BenchmarkDistributor_Push(b *testing.B) {
 		},
 		"max label value length limit reached": {
 			prepareConfig: func(limits *validation.Limits) {
-				limits.MaxLabelValueLength = 1024
+				limits.MaxLabelValueLength = 200
 			},
 			prepareSeries: func() ([][]mimirpb.LabelAdapter, []mimirpb.Sample) {
 				metrics := make([][]mimirpb.LabelAdapter, numSeriesPerRequest)
@@ -1907,7 +1974,7 @@ func BenchmarkDistributor_Push(b *testing.B) {
 
 				for i := 0; i < numSeriesPerRequest; i++ {
 					// Add a label with a very long value.
-					metrics[i] = mkLabels(10, "xxx", fmt.Sprintf("xxx_%0.2000d", 1))
+					metrics[i] = mkLabels(10, "xxx", fmt.Sprintf("xxx_%0.200d", 1))
 					samples[i] = mimirpb.Sample{
 						Value:       float64(i),
 						TimestampMs: time.Now().UnixNano() / int64(time.Millisecond),
@@ -2016,7 +2083,7 @@ func BenchmarkDistributor_Push(b *testing.B) {
 			require.NoError(b, err)
 
 			// Start the distributor.
-			distributor, err := New(distributorCfg, clientConfig, overrides, nil, ingestersRing, true, nil, log.NewNopLogger())
+			distributor, err := New(distributorCfg, clientConfig, overrides, nil, ingestersRing, nil, true, nil, log.NewNopLogger())
 			require.NoError(b, err)
 			require.NoError(b, services.StartAndAwaitRunning(context.Background(), distributor))
 
@@ -2056,7 +2123,7 @@ func TestSlowQueries(t *testing.T) {
 				expectedErr = errFail
 			}
 
-			ds, _, reg := prepare(t, prepConfig{
+			ds, _, reg, _ := prepare(t, prepConfig{
 				numIngesters:    nIngesters,
 				happyIngesters:  happy,
 				numDistributors: 1,
@@ -2089,8 +2156,10 @@ func TestDistributor_MetricsForLabelMatchers(t *testing.T) {
 	tests := map[string]struct {
 		shuffleShardSize  int
 		matchers          []*labels.Matcher
+		maxSeriesPerQuery int
 		expectedResult    []labels.Labels
 		expectedIngesters int
+		expectedError     error
 	}{
 		"should return an empty response if no metric match": {
 			matchers: []*labels.Matcher{
@@ -2140,44 +2209,92 @@ func TestDistributor_MetricsForLabelMatchers(t *testing.T) {
 			},
 			expectedIngesters: 3,
 		},
+		"should error out if max series per query is reached": {
+			matchers: []*labels.Matcher{
+				mustNewMatcher(labels.MatchEqual, model.MetricNameLabel, "test_1"),
+			},
+			maxSeriesPerQuery: 1,
+			expectedError:     validation.NewLimitError("the query exceeded the maximum number of series (limit: 1 series) (err-mimir-max-series-per-query). Consider reducing the time range and/or number of series selected by the query. One way to reduce the number of selected series is to add more label matchers to the query. Otherwise, to adjust the related per-tenant limit, configure -querier.max-fetched-series-per-query, or contact your service administrator."),
+		},
 	}
 
 	for testName, testData := range tests {
+		testData := testData
+
 		t.Run(testName, func(t *testing.T) {
-			now := model.Now()
+			t.Parallel()
 
-			// Create distributor
-			ds, ingesters, _ := prepare(t, prepConfig{
-				numIngesters:     numIngesters,
-				happyIngesters:   numIngesters,
-				numDistributors:  1,
-				shuffleShardSize: testData.shuffleShardSize,
-			})
+			for _, ingestStorageEnabled := range []bool{false, true} {
+				ingestStorageEnabled := ingestStorageEnabled
 
-			// Push fixtures
-			ctx := user.InjectOrgID(context.Background(), "test")
+				t.Run(fmt.Sprintf("ingest storage enabled: %t", ingestStorageEnabled), func(t *testing.T) {
+					t.Parallel()
 
-			for _, series := range fixtures {
-				req := mockWriteRequest(series.lbls, series.value, series.timestamp)
-				_, err := ds[0].Push(ctx, req)
-				require.NoError(t, err)
+					now := model.Now()
+
+					testConfig := prepConfig{
+						numIngesters:    numIngesters,
+						happyIngesters:  numIngesters,
+						numDistributors: 1,
+					}
+
+					if ingestStorageEnabled {
+						testConfig.ingestStorageEnabled = true
+						testConfig.limits = prepareDefaultLimits()
+						testConfig.limits.IngestionPartitionsTenantShardSize = testData.shuffleShardSize
+					} else {
+						testConfig.shuffleShardSize = testData.shuffleShardSize
+					}
+
+					// Create distributor
+					ds, ingesters, _, _ := prepare(t, testConfig)
+
+					// Ensure strong read consistency, required to have no flaky tests when ingest storage is enabled.
+					ctx := user.InjectOrgID(context.Background(), "test")
+					ctx = api.ContextWithReadConsistency(ctx, api.ReadConsistencyStrong)
+
+					// Push fixtures
+					for _, series := range fixtures {
+						req := mockWriteRequest(series.lbls, series.value, series.timestamp)
+						_, err := ds[0].Push(ctx, req)
+						require.NoError(t, err)
+					}
+
+					// Set up limiter
+					ctx = limiter.AddQueryLimiterToContext(ctx, limiter.NewQueryLimiter(testData.maxSeriesPerQuery, 0, 0, 0, stats.NewQueryMetrics(prometheus.NewPedanticRegistry())))
+
+					metrics, err := ds[0].MetricsForLabelMatchers(ctx, now, now, testData.matchers...)
+					if testData.expectedError != nil {
+						require.ErrorIs(t, err, testData.expectedError)
+						return
+					}
+
+					require.NoError(t, err)
+					assert.ElementsMatch(t, testData.expectedResult, metrics)
+
+					// Check how many ingesters have been queried.
+					if ingestStorageEnabled {
+						// When ingest storage is enabled, we request quorum 1 for each partition.
+						// In this test each ingester owns a different partition, so we expect all
+						// ingesters to be queried.
+						assert.Equal(t, testData.expectedIngesters, countMockIngestersCalled(ingesters, "MetricsForLabelMatchers"))
+					} else {
+						// Due to the quorum the distributor could cancel the last request towards ingesters
+						// if all other ones are successful, so we're good either has been queried X or X-1
+						// ingesters.
+						assert.Contains(t, []int{testData.expectedIngesters, testData.expectedIngesters - 1}, countMockIngestersCalled(ingesters, "MetricsForLabelMatchers"))
+					}
+				})
 			}
-
-			metrics, err := ds[0].MetricsForLabelMatchers(ctx, now, now, testData.matchers...)
-			require.NoError(t, err)
-			assert.ElementsMatch(t, testData.expectedResult, metrics)
-
-			// Check how many ingesters have been queried.
-			// Due to the quorum the distributor could cancel the last request towards ingesters
-			// if all other ones are successful, so we're good either has been queried X or X-1
-			// ingesters.
-			assert.Contains(t, []int{testData.expectedIngesters, testData.expectedIngesters - 1}, countMockIngestersCalls(ingesters, "MetricsForLabelMatchers"))
 		})
 	}
 }
 
 func TestDistributor_ActiveSeries(t *testing.T) {
 	const numIngesters = 5
+	const responseSizeLimitBytes = 1024
+
+	collision1, collision2 := labelsWithHashCollision()
 
 	pushedData := []struct {
 		lbls      labels.Labels
@@ -2187,10 +2304,15 @@ func TestDistributor_ActiveSeries(t *testing.T) {
 		{labels.FromStrings(labels.MetricName, "test_1", "team", "a"), 1, 100000},
 		{labels.FromStrings(labels.MetricName, "test_1", "team", "b"), 1, 110000},
 		{labels.FromStrings(labels.MetricName, "test_2"), 2, 200000},
+		{collision1, 3, 300000},
+		{collision2, 4, 300000},
+		{labels.FromStrings(labels.MetricName, "large_metric", "label", strings.Repeat("1", 2*responseSizeLimitBytes)), 5, 400000},
 	}
+
 	tests := map[string]struct {
 		shuffleShardSize            int
 		requestMatchers             []*labels.Matcher
+		expectError                 error
 		expectedSeries              []labels.Labels
 		expectedNumQueriedIngesters int
 	}{
@@ -2210,43 +2332,533 @@ func TestDistributor_ActiveSeries(t *testing.T) {
 			expectedSeries:              []labels.Labels{pushedData[2].lbls},
 			expectedNumQueriedIngesters: 3,
 		},
+		"should return all matching series even if their hash collides": {
+			requestMatchers:             []*labels.Matcher{labels.MustNewMatcher(labels.MatchEqual, model.MetricNameLabel, "metric")},
+			expectedSeries:              []labels.Labels{collision1, collision2},
+			expectedNumQueriedIngesters: numIngesters,
+		},
+		"aborts if response is too large": {
+			requestMatchers: []*labels.Matcher{labels.MustNewMatcher(labels.MatchEqual, model.MetricNameLabel, "large_metric")},
+			expectError:     ErrResponseTooLarge,
+		},
 	}
 
-	for testName, test := range tests {
-		t.Run(testName, func(t *testing.T) {
-			// Create distributor and ingesters.
-			distributors, ingesters, _ := prepare(t, prepConfig{
-				numIngesters:     numIngesters,
-				happyIngesters:   numIngesters,
-				numDistributors:  1,
-				shuffleShardSize: test.shuffleShardSize,
-			})
-			distributor := distributors[0]
+	// Programmatically build different scenarios under which run the tests.
+	type scenario struct {
+		ingestStorageEnabled     bool
+		minimizeIngesterRequests bool
+	}
 
-			// Push test data.
-			ctx := user.InjectOrgID(context.Background(), "test")
-			for _, series := range pushedData {
-				req := mockWriteRequest(series.lbls, series.value, series.timestamp)
-				_, err := distributor.Push(ctx, req)
-				require.NoError(t, err)
+	scenarios := map[string]scenario{}
+	for _, minimizeIngesterRequests := range []bool{false, true} {
+		for _, ingestStorageEnabled := range []bool{false, true} {
+			name := fmt.Sprintf("minimize ingester requests: %t, ingest storage enabled: %t", minimizeIngesterRequests, ingestStorageEnabled)
+
+			scenarios[name] = scenario{
+				ingestStorageEnabled:     ingestStorageEnabled,
+				minimizeIngesterRequests: minimizeIngesterRequests,
 			}
+		}
+	}
 
-			// Prepare empty query stats.
-			qStats, ctx := stats.ContextWithEmptyStats(ctx)
+	for testName, testData := range tests {
+		testData := testData
 
-			// Query active series.
-			series, err := distributor.ActiveSeries(ctx, test.requestMatchers)
-			require.NoError(t, err)
-			assert.ElementsMatch(t, test.expectedSeries, series)
+		t.Run(testName, func(t *testing.T) {
+			t.Parallel()
 
-			// Check that query stats are set correctly.
-			assert.Equal(t, uint64(len(test.expectedSeries)), qStats.GetFetchedSeriesCount())
+			for scenarioName, scenarioData := range scenarios {
+				scenarioData := scenarioData
 
-			// Check that the correct number of ingesters have been queried.
-			assert.Contains(t, []int{test.expectedNumQueriedIngesters, test.expectedNumQueriedIngesters - 1}, countMockIngestersCalls(ingesters, "ActiveSeries"))
+				t.Run(scenarioName, func(t *testing.T) {
+					t.Parallel()
+
+					testConfig := prepConfig{
+						numIngesters:         numIngesters,
+						happyIngesters:       numIngesters,
+						numDistributors:      1,
+						ingestStorageEnabled: scenarioData.ingestStorageEnabled,
+						configure: func(config *Config) {
+							config.MinimizeIngesterRequests = scenarioData.minimizeIngesterRequests
+						},
+						limits: func() *validation.Limits {
+							limits := prepareDefaultLimits()
+							limits.ActiveSeriesResultsMaxSizeBytes = responseSizeLimitBytes
+							return limits
+						}(),
+					}
+
+					if scenarioData.ingestStorageEnabled {
+						testConfig.limits.IngestionPartitionsTenantShardSize = testData.shuffleShardSize
+					} else {
+						testConfig.shuffleShardSize = testData.shuffleShardSize
+					}
+
+					// Create distributor and ingesters.
+					distributors, ingesters, _, _ := prepare(t, testConfig)
+					d := distributors[0]
+
+					// Ensure strong read consistency, required to have no flaky tests when ingest storage is enabled.
+					ctx := user.InjectOrgID(context.Background(), "test")
+					ctx = api.ContextWithReadConsistency(ctx, api.ReadConsistencyStrong)
+
+					// Push test data.
+					for _, series := range pushedData {
+						req := mockWriteRequest(series.lbls, series.value, series.timestamp)
+						_, err := d.Push(ctx, req)
+						require.NoError(t, err)
+					}
+
+					// Prepare empty query stats.
+					qStats, ctx := stats.ContextWithEmptyStats(ctx)
+
+					// Query active series.
+					series, err := d.ActiveSeries(ctx, testData.requestMatchers)
+					if testData.expectError != nil {
+						require.ErrorIs(t, err, testData.expectError)
+						return
+					}
+
+					require.NoError(t, err)
+					assert.ElementsMatch(t, testData.expectedSeries, series)
+
+					// Check that query stats are set correctly.
+					assert.Equal(t, uint64(len(testData.expectedSeries)), qStats.GetFetchedSeriesCount())
+
+					// Check how many ingesters have been queried.
+					if scenarioData.ingestStorageEnabled {
+						// When ingest storage is enabled, we request quorum 1 for each partition.
+						// In this test each ingester owns a different partition, so we expect all
+						// ingesters to be queried.
+						assert.Equal(t, testData.expectedNumQueriedIngesters, countMockIngestersCalled(ingesters, "ActiveSeries"))
+					} else {
+						// Due to the quorum the distributor could cancel the last request towards ingesters
+						// if all other ones are successful, so we're good either has been queried X or X-1
+						// ingesters.
+						assert.Contains(t, []int{testData.expectedNumQueriedIngesters, testData.expectedNumQueriedIngesters - 1}, countMockIngestersCalled(ingesters, "ActiveSeries"))
+					}
+				})
+			}
 		})
 	}
+}
 
+func TestDistributor_ActiveSeries_AvailabilityAndConsistency(t *testing.T) {
+	// In this test we run all queries with a matcher which matches all series.
+	reqMatchers := []*labels.Matcher{labels.MustNewMatcher(labels.MatchRegexp, model.MetricNameLabel, ".+")}
+
+	tests := map[string]struct {
+		ingesterStateByZone map[string]ingesterZoneState
+		ingesterDataByZone  map[string][]*mimirpb.WriteRequest
+		shardSize           int
+		expectedSeriesCount int
+		expectedErr         error
+	}{
+		"single zone, 3 ingesters, every series successfully replicated to 3 ingesters": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"single-zone": {numIngesters: 3, happyIngesters: 3},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"single-zone": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+				},
+			},
+			expectedSeriesCount: 3,
+		},
+		"single zone, 3 ingesters, every series successfully replicated only to 2 ingesters": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"single-zone": {numIngesters: 3, happyIngesters: 3},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"single-zone": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_2", "series_3"),
+				},
+			},
+			expectedSeriesCount: 3,
+		},
+		"single zone, 6 ingesters, every series successfully replicated to 3 ingesters": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"single-zone": {numIngesters: 6, happyIngesters: 6},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"single-zone": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					makeWriteRequest(0, 1, 0, false, false, "series_6", "series_7", "series_8", "series_9"),
+					makeWriteRequest(0, 1, 0, false, false, "series_6", "series_7", "series_8", "series_9"),
+					makeWriteRequest(0, 1, 0, false, false, "series_6", "series_7", "series_8", "series_9"),
+				},
+			},
+			expectedSeriesCount: 9,
+		},
+		"single zone, 6 ingesters, most series successfully replicated to 3 ingesters": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"single-zone": {numIngesters: 6, happyIngesters: 6},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"single-zone": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					makeWriteRequest(0, 1, 0, false, false, "series_6", "series_7", "series_8", "series_9"),
+					makeWriteRequest(0, 1, 0, false, false, "series_6", "series_7", "series_8", "series_9"),
+					makeWriteRequest(0, 1, 0, false, false, "series_6", "series_7", "series_8"), // series_9 has not been replicated here.
+				},
+			},
+			expectedSeriesCount: 9,
+		},
+		"single zone, 6 ingesters, 1 ingester in LEAVING state": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"single-zone": {numIngesters: 6, happyIngesters: 6, ringStates: []ring.InstanceState{ring.LEAVING, ring.ACTIVE, ring.ACTIVE, ring.ACTIVE, ring.ACTIVE, ring.ACTIVE}},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"single-zone": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_4", "series_5", "series_6"),
+					makeWriteRequest(0, 1, 0, false, false, "series_4", "series_5", "series_6"),
+					makeWriteRequest(0, 1, 0, false, false, "series_4", "series_5", "series_6"),
+				},
+			},
+			expectedSeriesCount: 6,
+		},
+		"single zone, 6 ingesters, 2 ingesters in LEAVING state": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"single-zone": {numIngesters: 6, happyIngesters: 6, ringStates: []ring.InstanceState{ring.LEAVING, ring.LEAVING, ring.ACTIVE, ring.ACTIVE, ring.ACTIVE, ring.ACTIVE}},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"single-zone": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_4", "series_5", "series_6"),
+					makeWriteRequest(0, 1, 0, false, false, "series_4", "series_5", "series_6"),
+					makeWriteRequest(0, 1, 0, false, false, "series_4", "series_5", "series_6"),
+				},
+			},
+			expectedErr: ring.ErrTooManyUnhealthyInstances,
+		},
+		"single zone, 6 ingesters, 1 ingester is UNHEALTHY": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"single-zone": {numIngesters: 6, happyIngesters: 5},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"single-zone": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_4", "series_5", "series_6"),
+					makeWriteRequest(0, 1, 0, false, false, "series_4", "series_5", "series_6"),
+					nil,
+				},
+			},
+			expectedErr: errFail,
+		},
+		"multi zone, 3 ingesters, every series successfully replicated to 3 ingesters": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {numIngesters: 1, happyIngesters: 1},
+				"zone-b": {numIngesters: 1, happyIngesters: 1},
+				"zone-c": {numIngesters: 1, happyIngesters: 1},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+				},
+				"zone-b": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+				},
+				"zone-c": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+				},
+			},
+			expectedSeriesCount: 3,
+		},
+		"multi zone, 3 ingesters, every series successfully replicated only to 2 ingesters across 2 zones": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {numIngesters: 1, happyIngesters: 1},
+				"zone-b": {numIngesters: 1, happyIngesters: 1},
+				"zone-c": {numIngesters: 1, happyIngesters: 1},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+				},
+				"zone-b": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+				},
+				"zone-c": {
+					nil,
+				},
+			},
+			expectedSeriesCount: 3,
+		},
+		"multi zone, 3 ingesters, every series successfully replicated only to 2 ingesters across 3 zones": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {numIngesters: 1, happyIngesters: 1},
+				"zone-b": {numIngesters: 1, happyIngesters: 1},
+				"zone-c": {numIngesters: 1, happyIngesters: 1},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2"),
+				},
+				"zone-b": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_3"),
+				},
+				"zone-c": {
+					makeWriteRequest(0, 1, 0, false, false, "series_2", "series_3"),
+				},
+			},
+			expectedSeriesCount: 3,
+		},
+		"multi zone, 6 ingesters, every series successfully replicated to 1 ingester per zone": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {numIngesters: 2, happyIngesters: 2},
+				"zone-b": {numIngesters: 2, happyIngesters: 2},
+				"zone-c": {numIngesters: 2, happyIngesters: 2},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					makeWriteRequest(0, 1, 0, false, false, "series_6"),
+				},
+				"zone-b": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_4", "series_5", "series_6"),
+				},
+				"zone-c": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4"),
+					makeWriteRequest(0, 1, 0, false, false, "series_5", "series_6"),
+				},
+			},
+			expectedSeriesCount: 6,
+		},
+		"multi zone, 6 ingesters, all ingesters in 1 zone are in LEAVING state": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {numIngesters: 2, happyIngesters: 2, ringStates: []ring.InstanceState{ring.LEAVING, ring.LEAVING}},
+				"zone-b": {numIngesters: 2, happyIngesters: 2},
+				"zone-c": {numIngesters: 2, happyIngesters: 2},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					makeWriteRequest(0, 1, 0, false, false, "series_6"),
+				},
+				"zone-b": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_4", "series_5", "series_6"),
+				},
+				"zone-c": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4"),
+					makeWriteRequest(0, 1, 0, false, false, "series_5", "series_6"),
+				},
+			},
+			expectedSeriesCount: 6,
+		},
+		"multi zone, 6 ingesters, all ingesters in 2 zones are in LEAVING state": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {numIngesters: 2, happyIngesters: 2, ringStates: []ring.InstanceState{ring.LEAVING, ring.LEAVING}},
+				"zone-b": {numIngesters: 2, happyIngesters: 2, ringStates: []ring.InstanceState{ring.LEAVING, ring.LEAVING}},
+				"zone-c": {numIngesters: 2, happyIngesters: 2},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					makeWriteRequest(0, 1, 0, false, false, "series_6"),
+				},
+				"zone-b": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_4", "series_5", "series_6"),
+				},
+				"zone-c": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4"),
+					makeWriteRequest(0, 1, 0, false, false, "series_5", "series_6"),
+				},
+			},
+			expectedErr: ring.ErrTooManyUnhealthyInstances,
+		},
+		"multi zone, 6 ingesters, all ingesters in 1 zone are UNHEALTHY": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {numIngesters: 2, happyIngesters: 0},
+				"zone-b": {numIngesters: 2, happyIngesters: 2},
+				"zone-c": {numIngesters: 2, happyIngesters: 2},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					nil,
+					nil,
+				},
+				"zone-b": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_4", "series_5", "series_6"),
+				},
+				"zone-c": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4"),
+					makeWriteRequest(0, 1, 0, false, false, "series_5", "series_6"),
+				},
+			},
+			expectedSeriesCount: 6,
+		},
+		"multi zone, 6 ingesters, 1 UNHEALTHY ingester in 2 zones": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {numIngesters: 2, happyIngesters: 1},
+				"zone-b": {numIngesters: 2, happyIngesters: 1},
+				"zone-c": {numIngesters: 2, happyIngesters: 2},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					nil,
+				},
+				"zone-b": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					nil,
+				},
+				"zone-c": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4"),
+					makeWriteRequest(0, 1, 0, false, false, "series_5", "series_6"),
+				},
+			},
+			expectedErr: errFail,
+		},
+		"multi zone, 6 ingesters, 1 LEAVING ingester per zone, but the LEAVING ingesters are not part of tenant's shard": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {numIngesters: 2, happyIngesters: 2, ringStates: []ring.InstanceState{ring.ACTIVE, ring.LEAVING}},
+				"zone-b": {numIngesters: 2, happyIngesters: 2, ringStates: []ring.InstanceState{ring.ACTIVE, ring.LEAVING}},
+				"zone-c": {numIngesters: 2, happyIngesters: 2, ringStates: []ring.InstanceState{ring.ACTIVE, ring.LEAVING}},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					makeWriteRequest(0, 1, 0, false, false, "series_6", "series_7"), // Not belonging to tenant's shard.
+				},
+				"zone-b": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					makeWriteRequest(0, 1, 0, false, false, "series_6", "series_7"), // Not belonging to tenant's shard.
+				},
+				"zone-c": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					makeWriteRequest(0, 1, 0, false, false, "series_6", "series_7"), // Not belonging to tenant's shard.
+				},
+			},
+			shardSize:           1, // Tenant's shard made of: ingester-zone-a-0, ingester-zone-b-0 and ingester-zone-c-0.
+			expectedSeriesCount: 5,
+		},
+		"multi zone, 6 ingesters, 1 UNHEALTHY ingester per zone, but the UNHEALTHY ingesters are not part of tenant's shard": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {states: []ingesterState{ingesterStateHappy, ingesterStateFailed}},
+				"zone-b": {states: []ingesterState{ingesterStateHappy, ingesterStateFailed}},
+				"zone-c": {states: []ingesterState{ingesterStateHappy, ingesterStateFailed}},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					nil,
+				},
+				"zone-b": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					nil,
+				},
+				"zone-c": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					nil,
+				},
+			},
+			shardSize:           1, // Tenant's shard made of: ingester-zone-a-0, ingester-zone-b-0 and ingester-zone-c-0.
+			expectedSeriesCount: 5,
+		},
+	}
+
+	for testName, testData := range tests {
+		testData := testData
+
+		t.Run(testName, func(t *testing.T) {
+			t.Parallel()
+
+			for _, minimizeIngesterRequests := range []bool{false, true} {
+				minimizeIngesterRequests := minimizeIngesterRequests
+
+				t.Run(fmt.Sprintf("minimize ingester requests: %t", minimizeIngesterRequests), func(t *testing.T) {
+					t.Parallel()
+
+					// Create distributor.
+					distributors, _, _, _ := prepare(t, prepConfig{
+						ingesterStateByZone: testData.ingesterStateByZone,
+						ingesterDataByZone:  testData.ingesterDataByZone,
+						numDistributors:     1,
+						shuffleShardSize:    testData.shardSize,
+						configure: func(config *Config) {
+							config.MinimizeIngesterRequests = minimizeIngesterRequests
+						},
+					})
+
+					ctx := user.InjectOrgID(context.Background(), "test")
+					qStats, ctx := stats.ContextWithEmptyStats(ctx)
+
+					// Query active series.
+					series, err := distributors[0].ActiveSeries(ctx, reqMatchers)
+					if testData.expectedErr != nil {
+						require.ErrorIs(t, err, testData.expectedErr)
+						return
+					}
+
+					require.NoError(t, err)
+					assert.Equal(t, testData.expectedSeriesCount, len(series))
+
+					// Check that query stats are set correctly.
+					assert.Equal(t, testData.expectedSeriesCount, int(qStats.GetFetchedSeriesCount()))
+				})
+			}
+		})
+	}
+}
+
+func BenchmarkDistributor_ActiveSeries(b *testing.B) {
+	const numIngesters = 3
+	const numSeries = 10e3
+
+	// Create distributor and ingesters.
+	distributors, _, _, _ := prepare(b, prepConfig{
+		numIngesters:    numIngesters,
+		happyIngesters:  numIngesters,
+		numDistributors: 1,
+	})
+
+	ctx := user.InjectOrgID(context.Background(), "user")
+
+	// Push test data.
+	metrics := make([][]mimirpb.LabelAdapter, numSeries)
+	samples := make([]mimirpb.Sample, numSeries)
+
+	for i := 0; i < numSeries; i++ {
+		metrics[i] = mkLabels(10)
+		metrics[i] = append(metrics[i], mimirpb.LabelAdapter{Name: "series_no", Value: fmt.Sprintf("series_%d", i)})
+		samples[i] = mimirpb.Sample{TimestampMs: time.Now().UnixNano() / int64(time.Millisecond), Value: 1}
+	}
+
+	_, err := distributors[0].Push(
+		ctx,
+		mimirpb.ToWriteRequest(metrics, samples, nil, nil, mimirpb.API),
+	)
+	require.NoError(b, err)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	// Run the benchmark.
+	for n := 0; n < b.N; n++ {
+		_, err := distributors[0].ActiveSeries(
+			ctx,
+			[]*labels.Matcher{mustNewMatcher(labels.MatchEqual, model.MetricNameLabel, "foo")},
+		)
+		require.NoError(b, err)
+	}
 }
 
 func TestDistributor_LabelNames(t *testing.T) {
@@ -2301,35 +2913,66 @@ func TestDistributor_LabelNames(t *testing.T) {
 	}
 
 	for testName, testData := range tests {
+		testData := testData
+
 		t.Run(testName, func(t *testing.T) {
-			now := model.Now()
+			t.Parallel()
 
-			// Create distributor
-			ds, ingesters, _ := prepare(t, prepConfig{
-				numIngesters:     numIngesters,
-				happyIngesters:   numIngesters,
-				numDistributors:  1,
-				shuffleShardSize: testData.shuffleShardSize,
-			})
+			for _, ingestStorageEnabled := range []bool{false, true} {
+				ingestStorageEnabled := ingestStorageEnabled
 
-			// Push fixtures
-			ctx := user.InjectOrgID(context.Background(), "test")
+				t.Run(fmt.Sprintf("ingest storage enabled: %t", ingestStorageEnabled), func(t *testing.T) {
+					t.Parallel()
 
-			for _, series := range fixtures {
-				req := mockWriteRequest(series.lbls, series.value, series.timestamp)
-				_, err := ds[0].Push(ctx, req)
-				require.NoError(t, err)
+					now := model.Now()
+
+					testConfig := prepConfig{
+						numIngesters:    numIngesters,
+						happyIngesters:  numIngesters,
+						numDistributors: 1,
+					}
+
+					if ingestStorageEnabled {
+						testConfig.ingestStorageEnabled = true
+
+						testConfig.limits = prepareDefaultLimits()
+						testConfig.limits.IngestionPartitionsTenantShardSize = testData.shuffleShardSize
+					} else {
+						testConfig.shuffleShardSize = testData.shuffleShardSize
+					}
+
+					// Create distributor
+					ds, ingesters, _, _ := prepare(t, testConfig)
+
+					// Ensure strong read consistency, required to have no flaky tests when ingest storage is enabled.
+					ctx := user.InjectOrgID(context.Background(), "test")
+					ctx = api.ContextWithReadConsistency(ctx, api.ReadConsistencyStrong)
+
+					// Push fixtures
+					for _, series := range fixtures {
+						req := mockWriteRequest(series.lbls, series.value, series.timestamp)
+						_, err := ds[0].Push(ctx, req)
+						require.NoError(t, err)
+					}
+
+					names, err := ds[0].LabelNames(ctx, now, now, testData.matchers...)
+					require.NoError(t, err)
+					assert.ElementsMatch(t, testData.expectedResult, names)
+
+					// Check how many ingesters have been queried.
+					if ingestStorageEnabled {
+						// When ingest storage is enabled, we request quorum 1 for each partition.
+						// In this test each ingester owns a different partition, so we expect all
+						// ingesters to be queried.
+						assert.Equal(t, testData.expectedIngesters, countMockIngestersCalled(ingesters, "LabelNames"))
+					} else {
+						// Due to the quorum the distributor could cancel the last request towards ingesters
+						// if all other ones are successful, so we're good either has been queried X or X-1
+						// ingesters.
+						assert.Contains(t, []int{testData.expectedIngesters, testData.expectedIngesters - 1}, countMockIngestersCalled(ingesters, "LabelNames"))
+					}
+				})
 			}
-
-			names, err := ds[0].LabelNames(ctx, now, now, testData.matchers...)
-			require.NoError(t, err)
-			assert.ElementsMatch(t, testData.expectedResult, names)
-
-			// Check how many ingesters have been queried.
-			// Due to the quorum the distributor could cancel the last request towards ingesters
-			// if all other ones are successful, so we're good either has been queried X or X-1
-			// ingesters.
-			assert.Contains(t, []int{testData.expectedIngesters, testData.expectedIngesters - 1}, countMockIngestersCalls(ingesters, "LabelNames"))
 		})
 	}
 }
@@ -2352,43 +2995,73 @@ func TestDistributor_MetricsMetadata(t *testing.T) {
 	}
 
 	for testName, testData := range tests {
+		testData := testData
+
 		t.Run(testName, func(t *testing.T) {
-			// Create distributor
-			ds, _, _ := prepare(t, prepConfig{
-				numIngesters:     numIngesters,
-				happyIngesters:   numIngesters,
-				numDistributors:  1,
-				shuffleShardSize: testData.shuffleShardSize,
-				limits:           nil,
-			})
+			t.Parallel()
 
-			// Push metadata
-			ctx := user.InjectOrgID(context.Background(), "test")
+			for _, ingestStorageEnabled := range []bool{false, true} {
+				ingestStorageEnabled := ingestStorageEnabled
 
-			req := makeWriteRequest(0, 0, 10, false, true)
-			_, err := ds[0].Push(ctx, req)
-			require.NoError(t, err)
+				t.Run(fmt.Sprintf("ingest storage enabled: %t", ingestStorageEnabled), func(t *testing.T) {
+					t.Parallel()
 
-			// Check how many ingesters are queried as part of the shuffle sharding subring.
-			replicationSet, err := ds[0].GetIngesters(ctx)
-			require.NoError(t, err)
-			assert.Equal(t, testData.expectedIngesters, len(replicationSet.Instances))
+					testConfig := prepConfig{
+						numIngesters:    numIngesters,
+						happyIngesters:  numIngesters,
+						numDistributors: 1,
+					}
 
-			// Assert on metric metadata
-			metadata, err := ds[0].MetricsMetadata(ctx, client.DefaultMetricsMetadataRequest())
-			require.NoError(t, err)
+					if ingestStorageEnabled {
+						testConfig.ingestStorageEnabled = true
+						testConfig.limits = prepareDefaultLimits()
+						testConfig.limits.IngestionPartitionsTenantShardSize = testData.shuffleShardSize
+					} else {
+						testConfig.shuffleShardSize = testData.shuffleShardSize
+					}
 
-			expectedMetadata := make([]scrape.MetricMetadata, 0, len(req.Metadata))
-			for _, m := range req.Metadata {
-				expectedMetadata = append(expectedMetadata, scrape.MetricMetadata{
-					Metric: m.MetricFamilyName,
-					Type:   mimirpb.MetricMetadataMetricTypeToMetricType(m.Type),
-					Help:   m.Help,
-					Unit:   m.Unit,
+					// Create distributor
+					ds, ingesters, _, _ := prepare(t, testConfig)
+
+					// Ensure strong read consistency, required to have no flaky tests when ingest storage is enabled.
+					ctx := user.InjectOrgID(context.Background(), "test")
+					ctx = api.ContextWithReadConsistency(ctx, api.ReadConsistencyStrong)
+
+					// Push metadata
+					req := makeWriteRequest(0, 0, 10, false, true, "foo")
+					_, err := ds[0].Push(ctx, req)
+					require.NoError(t, err)
+
+					// Assert on metric metadata
+					metadata, err := ds[0].MetricsMetadata(ctx, client.DefaultMetricsMetadataRequest())
+					require.NoError(t, err)
+
+					expectedMetadata := make([]scrape.MetricMetadata, 0, len(req.Metadata))
+					for _, m := range req.Metadata {
+						expectedMetadata = append(expectedMetadata, scrape.MetricMetadata{
+							Metric: m.MetricFamilyName,
+							Type:   mimirpb.MetricMetadataMetricTypeToMetricType(m.Type),
+							Help:   m.Help,
+							Unit:   m.Unit,
+						})
+					}
+
+					assert.ElementsMatch(t, metadata, expectedMetadata)
+
+					// Check how many ingesters have been queried.
+					if ingestStorageEnabled {
+						// When ingest storage is enabled, we request quorum 1 for each partition.
+						// In this test each ingester owns a different partition, so we expect all
+						// ingesters to be queried.
+						assert.Equal(t, testData.expectedIngesters, countMockIngestersCalled(ingesters, "MetricsMetadata"))
+					} else {
+						// Due to the quorum the distributor could cancel the last request towards ingesters
+						// if all other ones are successful, so we're good either has been queried X or X-1
+						// ingesters.
+						assert.Contains(t, []int{testData.expectedIngesters, testData.expectedIngesters - 1}, countMockIngestersCalled(ingesters, "MetricsMetadata"))
+					}
 				})
 			}
-
-			assert.ElementsMatch(t, metadata, expectedMetadata)
 		})
 	}
 }
@@ -2417,35 +3090,47 @@ func TestDistributor_LabelNamesAndValuesLimitTest(t *testing.T) {
 		},
 	}
 	for testName, testData := range tests {
+		testData := testData
+
 		t.Run(testName, func(t *testing.T) {
-			ctx := user.InjectOrgID(context.Background(), "label-names-values")
+			t.Parallel()
 
-			// Create distributor
-			limits := validation.Limits{}
-			flagext.DefaultValues(&limits)
-			limits.LabelNamesAndValuesResultsMaxSizeBytes = testData.sizeLimitBytes
-			ds, _, _ := prepare(t, prepConfig{
-				numIngesters:    3,
-				happyIngesters:  3,
-				numDistributors: 1,
-				limits:          &limits,
-			})
-			t.Cleanup(func() {
-				require.NoError(t, services.StopAndAwaitTerminated(ctx, ds[0]))
-			})
+			for _, ingestStorageEnabled := range []bool{false, true} {
+				ingestStorageEnabled := ingestStorageEnabled
 
-			// Push fixtures
-			for _, series := range fixtures {
-				req := mockWriteRequest(series.lbls, series.value, series.timestamp)
-				_, err := ds[0].Push(ctx, req)
-				require.NoError(t, err)
-			}
+				t.Run(fmt.Sprintf("ingest storage enabled: %t", ingestStorageEnabled), func(t *testing.T) {
+					t.Parallel()
 
-			_, err := ds[0].LabelNamesAndValues(ctx, []*labels.Matcher{})
-			if len(testData.expectedError) == 0 {
-				require.NoError(t, err)
-			} else {
-				require.EqualError(t, err, testData.expectedError)
+					// Ensure strong read consistency, required to have no flaky tests when ingest storage is enabled.
+					ctx := user.InjectOrgID(context.Background(), "label-names-values")
+					ctx = api.ContextWithReadConsistency(ctx, api.ReadConsistencyStrong)
+
+					// Create distributor
+					limits := validation.Limits{}
+					flagext.DefaultValues(&limits)
+					limits.LabelNamesAndValuesResultsMaxSizeBytes = testData.sizeLimitBytes
+					ds, _, _, _ := prepare(t, prepConfig{
+						numIngesters:         3,
+						happyIngesters:       3,
+						numDistributors:      1,
+						limits:               &limits,
+						ingestStorageEnabled: ingestStorageEnabled,
+					})
+
+					// Push fixtures
+					for _, series := range fixtures {
+						req := mockWriteRequest(series.lbls, series.value, series.timestamp)
+						_, err := ds[0].Push(ctx, req)
+						require.NoError(t, err)
+					}
+
+					_, err := ds[0].LabelNamesAndValues(ctx, []*labels.Matcher{}, cardinality.InMemoryMethod)
+					if len(testData.expectedError) == 0 {
+						require.NoError(t, err)
+					} else {
+						require.EqualError(t, err, testData.expectedError)
+					}
+				})
 			}
 		})
 	}
@@ -2485,30 +3170,42 @@ func TestDistributor_LabelValuesForLabelName(t *testing.T) {
 	}
 
 	for testName, testCase := range tests {
+		testCase := testCase
+
 		t.Run(testName, func(t *testing.T) {
-			ctx := user.InjectOrgID(context.Background(), "label-names-values")
+			t.Parallel()
 
-			// Create distributor
-			ds, _, _ := prepare(t, prepConfig{
-				numIngesters:      12,
-				happyIngesters:    12,
-				numDistributors:   1,
-				replicationFactor: 3,
-			})
-			t.Cleanup(func() {
-				require.NoError(t, services.StopAndAwaitTerminated(ctx, ds[0]))
-			})
+			for _, ingestStorageEnabled := range []bool{false, true} {
+				ingestStorageEnabled := ingestStorageEnabled
 
-			// Push fixtures
-			for _, series := range fixtures {
-				req := mockWriteRequest(series.lbls, series.value, series.timestamp)
-				_, err := ds[0].Push(ctx, req)
-				require.NoError(t, err)
+				t.Run(fmt.Sprintf("ingest storage enabled: %t", ingestStorageEnabled), func(t *testing.T) {
+					t.Parallel()
+
+					// Ensure strong read consistency, required to have no flaky tests when ingest storage is enabled.
+					ctx := user.InjectOrgID(context.Background(), "label-names-values")
+					ctx = api.ContextWithReadConsistency(ctx, api.ReadConsistencyStrong)
+
+					// Create distributor
+					ds, _, _, _ := prepare(t, prepConfig{
+						numIngesters:         12,
+						happyIngesters:       12,
+						numDistributors:      1,
+						replicationFactor:    3,
+						ingestStorageEnabled: ingestStorageEnabled,
+					})
+
+					// Push fixtures
+					for _, series := range fixtures {
+						req := mockWriteRequest(series.lbls, series.value, series.timestamp)
+						_, err := ds[0].Push(ctx, req)
+						require.NoError(t, err)
+					}
+
+					response, err := ds[0].LabelValuesForLabelName(ctx, testCase.from, testCase.to, labels.MetricName, testCase.matchers...)
+					require.NoError(t, err)
+					assert.ElementsMatch(t, response, testCase.expectedLabelValues)
+				})
 			}
-
-			response, err := ds[0].LabelValuesForLabelName(ctx, testCase.from, testCase.to, labels.MetricName, testCase.matchers...)
-			require.NoError(t, err)
-			assert.ElementsMatch(t, response, testCase.expectedLabelValues)
 		})
 	}
 }
@@ -2537,58 +3234,81 @@ func TestDistributor_LabelNamesAndValues(t *testing.T) {
 			Values:    []string{"200", "500"},
 		},
 	}
-	tests := map[string]struct {
-		zones              []string
-		zonesResponseDelay map[string]time.Duration
-	}{
-		"should group values of labels by label name and return only distinct label values": {},
-		"should return the results if zone awareness is enabled and only 2 zones return the results": {
-			zones:              []string{"A", "B", "C"},
-			zonesResponseDelay: map[string]time.Duration{"C": 10 * time.Second},
-		},
-	}
 
-	for testName, testData := range tests {
-		t.Run(testName, func(t *testing.T) {
-			ctx := user.InjectOrgID(context.Background(), "label-names-values")
+	t.Run("should group values of labels by label name and return only distinct label values", func(t *testing.T) {
+		for _, ingestStorageEnabled := range []bool{false, true} {
+			ingestStorageEnabled := ingestStorageEnabled
 
-			// Create distributor
-			ds, _, _ := prepare(t, prepConfig{
-				numIngesters:                       12,
-				happyIngesters:                     12,
-				numDistributors:                    1,
-				replicationFactor:                  3,
-				ingesterZones:                      testData.zones,
-				labelNamesStreamZonesResponseDelay: testData.zonesResponseDelay,
-			})
-			t.Cleanup(func() {
-				require.NoError(t, services.StopAndAwaitTerminated(ctx, ds[0]))
-			})
+			t.Run(fmt.Sprintf("ingest storage enabled: %t", ingestStorageEnabled), func(t *testing.T) {
+				t.Parallel()
 
-			// Push fixtures
-			for _, series := range fixtures {
-				req := mockWriteRequest(series.lbls, series.value, series.timestamp)
-				_, err := ds[0].Push(ctx, req)
+				// Ensure strong read consistency, required to have no flaky tests when ingest storage is enabled.
+				ctx := user.InjectOrgID(context.Background(), "label-names-values")
+				ctx = api.ContextWithReadConsistency(ctx, api.ReadConsistencyStrong)
+
+				// Create distributor
+				ds, _, _, _ := prepare(t, prepConfig{
+					numIngesters:         12,
+					happyIngesters:       12,
+					numDistributors:      1,
+					replicationFactor:    3,
+					ingestStorageEnabled: ingestStorageEnabled,
+				})
+
+				// Push fixtures
+				for _, series := range fixtures {
+					req := mockWriteRequest(series.lbls, series.value, series.timestamp)
+					_, err := ds[0].Push(ctx, req)
+					require.NoError(t, err)
+				}
+
+				response, err := ds[0].LabelNamesAndValues(ctx, []*labels.Matcher{}, cardinality.InMemoryMethod)
 				require.NoError(t, err)
-			}
+				require.Len(t, response.Items, len(expectedLabelValues))
 
-			// Assert on metric metadata
-			timeBeforeExecution := time.Now()
-			response, err := ds[0].LabelNamesAndValues(ctx, []*labels.Matcher{})
-			require.NoError(t, err)
-			if len(testData.zonesResponseDelay) > 0 {
-				executionDuration := time.Since(timeBeforeExecution)
-				require.Less(t, executionDuration, 5*time.Second, "Execution must be completed earlier than in 5 seconds")
-			}
-			require.Len(t, response.Items, len(expectedLabelValues))
+				// sort label values to make stable assertion
+				for _, item := range response.Items {
+					slices.Sort(item.Values)
+				}
+				assert.ElementsMatch(t, response.Items, expectedLabelValues)
+			})
+		}
+	})
 
-			// sort label values to make stable assertion
-			for _, item := range response.Items {
-				slices.Sort(item.Values)
-			}
-			assert.ElementsMatch(t, response.Items, expectedLabelValues)
+	t.Run("should return the results if zone awareness is enabled and only 2 zones return the results", func(t *testing.T) {
+		ctx := user.InjectOrgID(context.Background(), "label-names-values")
+		slowZoneDelay := 10 * time.Second
+
+		// Create distributor
+		ds, _, _, _ := prepare(t, prepConfig{
+			numIngesters:                       12,
+			happyIngesters:                     12,
+			numDistributors:                    1,
+			replicationFactor:                  3,
+			ingesterZones:                      []string{"A", "B", "C"},
+			labelNamesStreamZonesResponseDelay: map[string]time.Duration{"C": slowZoneDelay},
 		})
-	}
+
+		// Push fixtures
+		for _, series := range fixtures {
+			req := mockWriteRequest(series.lbls, series.value, series.timestamp)
+			_, err := ds[0].Push(ctx, req)
+			require.NoError(t, err)
+		}
+
+		// Assert on metric metadata
+		timeBeforeExecution := time.Now()
+		response, err := ds[0].LabelNamesAndValues(ctx, []*labels.Matcher{}, cardinality.InMemoryMethod)
+		require.NoError(t, err)
+		require.Less(t, time.Since(timeBeforeExecution), slowZoneDelay/2, "Execution must be completed before the slow zone ingesters respond")
+		require.Len(t, response.Items, len(expectedLabelValues))
+
+		// sort label values to make stable assertion
+		for _, item := range response.Items {
+			slices.Sort(item.Values)
+		}
+		assert.ElementsMatch(t, response.Items, expectedLabelValues)
+	})
 }
 
 // This test asserts that distributor waits for all ingester responses to be completed even if ZoneAwareness is enabled.
@@ -2608,17 +3328,36 @@ func TestDistributor_LabelValuesCardinality_ExpectedAllIngestersResponsesToBeCom
 // Also, it simulates delay from zone C to verify that there is no race condition. must be run with `-race` flag (race detection).
 func TestDistributor_LabelNamesAndValues_ExpectedAllPossibleLabelNamesAndValuesToBeReturned(t *testing.T) {
 	ctx, ds := prepareWithZoneAwarenessAndZoneDelay(t, createSeries(10000))
-	response, err := ds[0].LabelNamesAndValues(ctx, []*labels.Matcher{})
+	response, err := ds[0].LabelNamesAndValues(ctx, []*labels.Matcher{}, cardinality.InMemoryMethod)
 	require.NoError(t, err)
 	require.Len(t, response.Items, 1)
 	require.Equal(t, 10000, len(response.Items[0].Values))
+}
+
+// copied from pkg/ingester/activeseries/active_series_test.go
+func labelsWithHashCollision() (labels.Labels, labels.Labels) {
+	// These two series have the same XXHash; thanks to https://github.com/pstibrany/labels_hash_collisions
+	ls1 := labels.FromStrings("__name__", "metric", "lbl1", "value", "lbl2", "l6CQ5y")
+	ls2 := labels.FromStrings("__name__", "metric", "lbl1", "value", "lbl2", "v7uDlF")
+
+	if ls1.Hash() != ls2.Hash() {
+		// These ones are the same when using -tags stringlabels
+		ls1 = labels.FromStrings("__name__", "metric", "lbl", "HFnEaGl")
+		ls2 = labels.FromStrings("__name__", "metric", "lbl", "RqcXatm")
+	}
+
+	if ls1.Hash() != ls2.Hash() {
+		panic("This code needs to be updated: find new labels with colliding hash values.")
+	}
+
+	return ls1, ls2
 }
 
 func prepareWithZoneAwarenessAndZoneDelay(t *testing.T, fixtures []series) (context.Context, []*Distributor) {
 	ctx := user.InjectOrgID(context.Background(), "cardinality-user")
 
 	// Create distributor
-	ds, _, _ := prepare(t, prepConfig{
+	ds, _, _, _ := prepare(t, prepConfig{
 		numIngesters:      150,
 		happyIngesters:    150,
 		numDistributors:   1,
@@ -2630,9 +3369,6 @@ func prepareWithZoneAwarenessAndZoneDelay(t *testing.T, fixtures []series) (cont
 			"ZONE-B": 1 * time.Second,
 			"ZONE-C": 2 * time.Second,
 		},
-	})
-	t.Cleanup(func() {
-		require.NoError(t, services.StopAndAwaitTerminated(ctx, ds[0]))
 	})
 
 	// Push fixtures
@@ -2660,6 +3396,381 @@ func createSeries(count int) []series {
 	return fixtures
 }
 
+func TestDistributor_UserStats(t *testing.T) {
+	tests := map[string]struct {
+		ingesterStateByZone map[string]ingesterZoneState
+		ingesterDataByZone  map[string][]*mimirpb.WriteRequest
+		shardSize           int
+		expectedSeries      uint64
+		expectedErr         error
+	}{
+		"single zone, 3 ingesters, every series successfully replicated to 3 ingesters": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"single-zone": {numIngesters: 3, happyIngesters: 3},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"single-zone": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+				},
+			},
+			expectedSeries: 3,
+		},
+		"single zone, 3 ingesters, every series successfully replicated only to 2 ingesters": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"single-zone": {numIngesters: 3, happyIngesters: 3},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"single-zone": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_2", "series_3"),
+				},
+			},
+			// We pushed 3 series, but the estimated count is 2 because every series has been
+			// successfully replicated only to 2 ingesters.
+			expectedSeries: 2,
+		},
+		"single zone, 6 ingesters, every series successfully replicated to 3 ingesters": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"single-zone": {numIngesters: 6, happyIngesters: 6},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"single-zone": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					makeWriteRequest(0, 1, 0, false, false, "series_6", "series_7", "series_8", "series_9"),
+					makeWriteRequest(0, 1, 0, false, false, "series_6", "series_7", "series_8", "series_9"),
+					makeWriteRequest(0, 1, 0, false, false, "series_6", "series_7", "series_8", "series_9"),
+				},
+			},
+			expectedSeries: 9,
+		},
+		"single zone, 6 ingesters, most series successfully replicated to 3 ingesters": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"single-zone": {numIngesters: 6, happyIngesters: 6},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"single-zone": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					makeWriteRequest(0, 1, 0, false, false, "series_6", "series_7", "series_8", "series_9"),
+					makeWriteRequest(0, 1, 0, false, false, "series_6", "series_7", "series_8", "series_9"),
+					makeWriteRequest(0, 1, 0, false, false, "series_6", "series_7", "series_8"), // series_9 has not been replicated here.
+				},
+			},
+			expectedSeries: 9,
+		},
+		"single zone, 6 ingesters, 1 ingester in LEAVING state": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"single-zone": {numIngesters: 6, happyIngesters: 6, ringStates: []ring.InstanceState{ring.LEAVING, ring.ACTIVE, ring.ACTIVE, ring.ACTIVE, ring.ACTIVE, ring.ACTIVE}},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"single-zone": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_4", "series_5", "series_6"),
+					makeWriteRequest(0, 1, 0, false, false, "series_4", "series_5", "series_6"),
+					makeWriteRequest(0, 1, 0, false, false, "series_4", "series_5", "series_6"),
+				},
+			},
+			// We pushed 6 series but the LEAVING ingester isn't queried so its series are not counted
+			// in the estimation. The actual estimation is computed as: (3 series * 5 ingesters) / 3 RF = 5.
+			expectedSeries: 5,
+		},
+		"single zone, 6 ingesters, 2 ingesters in LEAVING state": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"single-zone": {numIngesters: 6, happyIngesters: 6, ringStates: []ring.InstanceState{ring.LEAVING, ring.LEAVING, ring.ACTIVE, ring.ACTIVE, ring.ACTIVE, ring.ACTIVE}},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"single-zone": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_4", "series_5", "series_6"),
+					makeWriteRequest(0, 1, 0, false, false, "series_4", "series_5", "series_6"),
+					makeWriteRequest(0, 1, 0, false, false, "series_4", "series_5", "series_6"),
+				},
+			},
+			expectedErr: ring.ErrTooManyUnhealthyInstances,
+		},
+		"single zone, 6 ingesters, 1 ingester is UNHEALTHY": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"single-zone": {numIngesters: 6, happyIngesters: 5},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"single-zone": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_4", "series_5", "series_6"),
+					makeWriteRequest(0, 1, 0, false, false, "series_4", "series_5", "series_6"),
+					nil,
+				},
+			},
+			expectedErr: errFail,
+		},
+		"multi zone, 3 ingesters, every series successfully replicated to 3 ingesters": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {numIngesters: 1, happyIngesters: 1},
+				"zone-b": {numIngesters: 1, happyIngesters: 1},
+				"zone-c": {numIngesters: 1, happyIngesters: 1},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+				},
+				"zone-b": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+				},
+				"zone-c": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+				},
+			},
+			expectedSeries: 3,
+		},
+		"multi zone, 3 ingesters, every series successfully replicated only to 2 ingesters across 2 zones": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {numIngesters: 1, happyIngesters: 1},
+				"zone-b": {numIngesters: 1, happyIngesters: 1},
+				"zone-c": {numIngesters: 1, happyIngesters: 1},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+				},
+				"zone-b": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+				},
+				"zone-c": {
+					nil,
+				},
+			},
+			expectedSeries: 3,
+		},
+		"multi zone, 3 ingesters, every series successfully replicated only to 2 ingesters across 3 zones": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {numIngesters: 1, happyIngesters: 1},
+				"zone-b": {numIngesters: 1, happyIngesters: 1},
+				"zone-c": {numIngesters: 1, happyIngesters: 1},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2"),
+				},
+				"zone-b": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_3"),
+				},
+				"zone-c": {
+					makeWriteRequest(0, 1, 0, false, false, "series_2", "series_3"),
+				},
+			},
+			// We pushed 3 series but every series has been successfully replicated only to 2 ingesters (in different zones).
+			expectedSeries: 2,
+		},
+		"multi zone, 6 ingesters, every series successfully replicated to 1 ingester per zone": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {numIngesters: 2, happyIngesters: 2},
+				"zone-b": {numIngesters: 2, happyIngesters: 2},
+				"zone-c": {numIngesters: 2, happyIngesters: 2},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					makeWriteRequest(0, 1, 0, false, false, "series_6"),
+				},
+				"zone-b": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_4", "series_5", "series_6"),
+				},
+				"zone-c": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4"),
+					makeWriteRequest(0, 1, 0, false, false, "series_5", "series_6"),
+				},
+			},
+			expectedSeries: 6,
+		},
+		"multi zone, 6 ingesters, all ingesters in 1 zone are in LEAVING state": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {numIngesters: 2, happyIngesters: 2, ringStates: []ring.InstanceState{ring.LEAVING, ring.LEAVING}},
+				"zone-b": {numIngesters: 2, happyIngesters: 2},
+				"zone-c": {numIngesters: 2, happyIngesters: 2},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					makeWriteRequest(0, 1, 0, false, false, "series_6"),
+				},
+				"zone-b": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_4", "series_5", "series_6"),
+				},
+				"zone-c": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4"),
+					makeWriteRequest(0, 1, 0, false, false, "series_5", "series_6"),
+				},
+			},
+			expectedSeries: 6,
+		},
+		"multi zone, 6 ingesters, all ingesters in 2 zones are in LEAVING state": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {numIngesters: 2, happyIngesters: 2, ringStates: []ring.InstanceState{ring.LEAVING, ring.LEAVING}},
+				"zone-b": {numIngesters: 2, happyIngesters: 2, ringStates: []ring.InstanceState{ring.LEAVING, ring.LEAVING}},
+				"zone-c": {numIngesters: 2, happyIngesters: 2},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					makeWriteRequest(0, 1, 0, false, false, "series_6"),
+				},
+				"zone-b": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_4", "series_5", "series_6"),
+				},
+				"zone-c": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4"),
+					makeWriteRequest(0, 1, 0, false, false, "series_5", "series_6"),
+				},
+			},
+			expectedErr: ring.ErrTooManyUnhealthyInstances,
+		},
+		"multi zone, 6 ingesters, all ingesters in 1 zone are UNHEALTHY": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {numIngesters: 2, happyIngesters: 0},
+				"zone-b": {numIngesters: 2, happyIngesters: 2},
+				"zone-c": {numIngesters: 2, happyIngesters: 2},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					nil,
+					nil,
+				},
+				"zone-b": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					makeWriteRequest(0, 1, 0, false, false, "series_4", "series_5", "series_6"),
+				},
+				"zone-c": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4"),
+					makeWriteRequest(0, 1, 0, false, false, "series_5", "series_6"),
+				},
+			},
+			expectedSeries: 6,
+		},
+		"multi zone, 6 ingesters, 1 UNHEALTHY ingester in 2 zones": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {numIngesters: 2, happyIngesters: 1},
+				"zone-b": {numIngesters: 2, happyIngesters: 1},
+				"zone-c": {numIngesters: 2, happyIngesters: 2},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					nil,
+				},
+				"zone-b": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3"),
+					nil,
+				},
+				"zone-c": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4"),
+					makeWriteRequest(0, 1, 0, false, false, "series_5", "series_6"),
+				},
+			},
+			expectedErr: errFail,
+		},
+		"multi zone, 6 ingesters, 1 LEAVING ingester per zone, but the LEAVING ingesters are not part of tenant's shard": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {numIngesters: 2, happyIngesters: 2, ringStates: []ring.InstanceState{ring.ACTIVE, ring.LEAVING}},
+				"zone-b": {numIngesters: 2, happyIngesters: 2, ringStates: []ring.InstanceState{ring.ACTIVE, ring.LEAVING}},
+				"zone-c": {numIngesters: 2, happyIngesters: 2, ringStates: []ring.InstanceState{ring.ACTIVE, ring.LEAVING}},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					makeWriteRequest(0, 1, 0, false, false, "series_6", "series_7"), // Not belonging to tenant's shard.
+				},
+				"zone-b": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					makeWriteRequest(0, 1, 0, false, false, "series_6", "series_7"), // Not belonging to tenant's shard.
+				},
+				"zone-c": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					makeWriteRequest(0, 1, 0, false, false, "series_6", "series_7"), // Not belonging to tenant's shard.
+				},
+			},
+			shardSize:      1, // Tenant's shard made of: ingester-zone-a-0, ingester-zone-b-0 and ingester-zone-c-0.
+			expectedSeries: 5,
+		},
+		"multi zone, 6 ingesters, 1 UNHEALTHY ingester per zone, but the UNHEALTHY ingesters are not part of tenant's shard": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {states: []ingesterState{ingesterStateHappy, ingesterStateFailed}},
+				"zone-b": {states: []ingesterState{ingesterStateHappy, ingesterStateFailed}},
+				"zone-c": {states: []ingesterState{ingesterStateHappy, ingesterStateFailed}},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					nil,
+				},
+				"zone-b": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					nil,
+				},
+				"zone-c": {
+					makeWriteRequest(0, 1, 0, false, false, "series_1", "series_2", "series_3", "series_4", "series_5"),
+					nil,
+				},
+			},
+			shardSize:      1, // Tenant's shard made of: ingester-zone-a-0, ingester-zone-b-0 and ingester-zone-c-0.
+			expectedSeries: 5,
+		},
+	}
+
+	for testName, testData := range tests {
+		testData := testData
+
+		t.Run(testName, func(t *testing.T) {
+			t.Parallel()
+
+			for _, minimizeIngesterRequests := range []bool{false, true} {
+				minimizeIngesterRequests := minimizeIngesterRequests
+
+				t.Run(fmt.Sprintf("minimize ingester requests: %t", minimizeIngesterRequests), func(t *testing.T) {
+					t.Parallel()
+
+					// Create distributor
+					distributors, _, _, _ := prepare(t, prepConfig{
+						numDistributors:     1,
+						replicationFactor:   3,
+						ingesterStateByZone: testData.ingesterStateByZone,
+						ingesterDataByZone:  testData.ingesterDataByZone,
+						shuffleShardSize:    testData.shardSize,
+						configure: func(config *Config) {
+							config.MinimizeIngesterRequests = minimizeIngesterRequests
+						},
+					})
+
+					// Fetch user stats.
+					ctx := user.InjectOrgID(context.Background(), "test")
+					res, err := distributors[0].UserStats(ctx, cardinality.InMemoryMethod)
+
+					if testData.expectedErr != nil {
+						require.ErrorIs(t, err, testData.expectedErr)
+						return
+					}
+
+					require.NoError(t, err)
+					assert.Equal(t, int(testData.expectedSeries), int(res.NumSeries))
+				})
+			}
+		})
+	}
+}
+
 func TestDistributor_LabelValuesCardinality(t *testing.T) {
 	const numIngesters = 3
 	const replicationFactor = 3
@@ -2675,28 +3786,25 @@ func TestDistributor_LabelValuesCardinality(t *testing.T) {
 	}
 
 	tests := map[string]struct {
-		labelNames                []model.LabelName
-		matchers                  []*labels.Matcher
-		ingestersSeriesCountTotal uint64
-		expectedResult            *client.LabelValuesCardinalityResponse
-		expectedIngesters         int
-		happyIngesters            int
-		expectedSeriesCountTotal  uint64
-		ingesterZones             []string
+		labelNames               []model.LabelName
+		matchers                 []*labels.Matcher
+		expectedResult           *client.LabelValuesCardinalityResponse
+		expectedIngesters        int
+		happyIngesters           int
+		expectedSeriesCountTotal uint64
+		ingesterZones            []string
 	}{
-		"should return an empty map if no label names": {
-			labelNames:                []model.LabelName{},
-			matchers:                  []*labels.Matcher{},
-			ingestersSeriesCountTotal: 0,
-			expectedResult:            &client.LabelValuesCardinalityResponse{Items: []*client.LabelValueSeriesCount{}},
-			expectedIngesters:         numIngesters,
-			happyIngesters:            numIngesters,
-			expectedSeriesCountTotal:  0,
+		"should return an empty map on no label names provided": {
+			labelNames:               []model.LabelName{},
+			matchers:                 []*labels.Matcher{},
+			expectedResult:           &client.LabelValuesCardinalityResponse{Items: []*client.LabelValueSeriesCount{}},
+			expectedIngesters:        numIngesters,
+			happyIngesters:           numIngesters,
+			expectedSeriesCountTotal: 3,
 		},
 		"should return a map with the label values and series occurrences of a single label name": {
-			labelNames:                []model.LabelName{labels.MetricName},
-			matchers:                  []*labels.Matcher{},
-			ingestersSeriesCountTotal: 100,
+			labelNames: []model.LabelName{labels.MetricName},
+			matchers:   []*labels.Matcher{},
 			expectedResult: &client.LabelValuesCardinalityResponse{
 				Items: []*client.LabelValueSeriesCount{{
 					LabelName:        labels.MetricName,
@@ -2705,13 +3813,12 @@ func TestDistributor_LabelValuesCardinality(t *testing.T) {
 			},
 			expectedIngesters:        numIngesters - 1,
 			happyIngesters:           numIngesters,
-			expectedSeriesCountTotal: 100,
+			expectedSeriesCountTotal: 3,
 			ingesterZones:            []string{"ZONE-A", "ZONE-B", "ZONE-C"},
 		},
 		"should return a map with the label values and series occurrences of a single label name, during single zone failure": {
-			labelNames:                []model.LabelName{labels.MetricName},
-			matchers:                  []*labels.Matcher{},
-			ingestersSeriesCountTotal: 100,
+			labelNames: []model.LabelName{labels.MetricName},
+			matchers:   []*labels.Matcher{},
 			expectedResult: &client.LabelValuesCardinalityResponse{
 				Items: []*client.LabelValueSeriesCount{{
 					LabelName:        labels.MetricName,
@@ -2720,13 +3827,12 @@ func TestDistributor_LabelValuesCardinality(t *testing.T) {
 			},
 			expectedIngesters:        numIngesters - 1,
 			happyIngesters:           numIngesters - 1,
-			expectedSeriesCountTotal: 100,
+			expectedSeriesCountTotal: 3,
 			ingesterZones:            []string{"ZONE-A", "ZONE-B", "ZONE-C"},
 		},
 		"should return a map with the label values and series occurrences of all the label names": {
-			labelNames:                []model.LabelName{labels.MetricName, "status"},
-			matchers:                  []*labels.Matcher{},
-			ingestersSeriesCountTotal: 100,
+			labelNames: []model.LabelName{labels.MetricName, "status"},
+			matchers:   []*labels.Matcher{},
 			expectedResult: &client.LabelValuesCardinalityResponse{
 				Items: []*client.LabelValueSeriesCount{
 					{
@@ -2741,52 +3847,364 @@ func TestDistributor_LabelValuesCardinality(t *testing.T) {
 			},
 			expectedIngesters:        numIngesters,
 			happyIngesters:           numIngesters,
-			expectedSeriesCountTotal: 100,
+			expectedSeriesCountTotal: 3,
 		},
 	}
 
 	for testName, testData := range tests {
+		testData := testData
+
 		t.Run(testName, func(t *testing.T) {
-			// Create distributor
-			ds, ingesters, _ := prepare(t, prepConfig{
-				numIngesters:              numIngesters,
-				happyIngesters:            testData.happyIngesters,
-				numDistributors:           1,
-				replicationFactor:         replicationFactor,
-				ingestersSeriesCountTotal: testData.ingestersSeriesCountTotal,
-				ingesterZones:             testData.ingesterZones,
-			})
+			t.Parallel()
 
-			// Push fixtures
-			ctx := user.InjectOrgID(context.Background(), "label-values-cardinality")
+			for _, minimizeIngesterRequests := range []bool{false, true} {
+				minimizeIngesterRequests := minimizeIngesterRequests
 
-			for _, series := range fixtures {
-				req := mockWriteRequest(series.labels, series.value, series.timestamp)
-				_, err := ds[0].Push(ctx, req)
-				require.NoError(t, err)
-			}
+				t.Run(fmt.Sprintf("minimize ingester requests: %t", minimizeIngesterRequests), func(t *testing.T) {
+					t.Parallel()
 
-			// Since the Push() response is sent as soon as the quorum is reached, when we reach this point
-			// the final ingester may not have received series yet.
-			// To avoid flaky test we retry the assertions until we hit the desired state within a reasonable timeout.
-			test.Poll(t, time.Second, testData.expectedResult, func() interface{} {
-				seriesCountTotal, cardinalityMap, err := ds[0].LabelValuesCardinality(ctx, testData.labelNames, testData.matchers, cardinality.InMemoryMethod)
-				require.NoError(t, err)
-				assert.Equal(t, testData.expectedSeriesCountTotal, seriesCountTotal)
-				// Make sure the resultant label names are sorted
-				sort.Slice(cardinalityMap.Items, func(l, r int) bool {
-					return cardinalityMap.Items[l].LabelName < cardinalityMap.Items[r].LabelName
+					// Create distributor
+					ds, ingesters, _, _ := prepare(t, prepConfig{
+						numIngesters:      numIngesters,
+						happyIngesters:    testData.happyIngesters,
+						numDistributors:   1,
+						replicationFactor: replicationFactor,
+						ingesterZones:     testData.ingesterZones,
+						configure: func(config *Config) {
+							config.MinimizeIngesterRequests = minimizeIngesterRequests
+						},
+					})
+
+					// Push fixtures
+					ctx := user.InjectOrgID(context.Background(), "label-values-cardinality")
+
+					for _, series := range fixtures {
+						req := mockWriteRequest(series.labels, series.value, series.timestamp)
+						_, err := ds[0].Push(ctx, req)
+						require.NoError(t, err)
+					}
+
+					// Since the Push() response is sent as soon as the quorum is reached, when we reach this point
+					// the final ingester may not have received series yet.
+					// To avoid flaky test we retry the assertions until we hit the desired state within a reasonable timeout.
+					test.Poll(t, time.Second, testData.expectedResult, func() interface{} {
+						seriesCountTotal, cardinalityMap, err := ds[0].LabelValuesCardinality(ctx, testData.labelNames, testData.matchers, cardinality.InMemoryMethod)
+						require.NoError(t, err)
+						assert.Equal(t, testData.expectedSeriesCountTotal, seriesCountTotal)
+						// Make sure the resultant label names are sorted
+						sort.Slice(cardinalityMap.Items, func(l, r int) bool {
+							return cardinalityMap.Items[l].LabelName < cardinalityMap.Items[r].LabelName
+						})
+						return cardinalityMap
+					})
+
+					// Make sure enough ingesters were queried
+					assert.GreaterOrEqual(t, countMockIngestersCalled(ingesters, "LabelValuesCardinality"), testData.expectedIngesters)
 				})
-				return cardinalityMap
-			})
-
-			// Make sure enough ingesters were queried
-			assert.GreaterOrEqual(t, countMockIngestersCalls(ingesters, "LabelValuesCardinality"), testData.expectedIngesters)
+			}
 		})
 	}
 }
 
-func TestDistributor_LabelValuesCardinalityLimit(t *testing.T) {
+func TestDistributor_LabelValuesCardinality_AvailabilityAndConsistency(t *testing.T) {
+	var (
+		// Define fixtures used in tests.
+		series1 = makeTimeseries([]string{labels.MetricName, "series_1", "job", "job-a", "service", "service-1"}, makeSamples(0, 0), nil)
+		series2 = makeTimeseries([]string{labels.MetricName, "series_2", "job", "job-b", "service", "service-1"}, makeSamples(0, 0), nil)
+		series3 = makeTimeseries([]string{labels.MetricName, "series_3", "job", "job-c", "service", "service-1"}, makeSamples(0, 0), nil)
+		series4 = makeTimeseries([]string{labels.MetricName, "series_4", "job", "job-a", "service", "service-1"}, makeSamples(0, 0), nil)
+		series5 = makeTimeseries([]string{labels.MetricName, "series_5", "job", "job-a", "service", "service-2"}, makeSamples(0, 0), nil)
+		series6 = makeTimeseries([]string{labels.MetricName, "series_6", "job", "job-b" /* no service label */}, makeSamples(0, 0), nil)
+		other1  = makeTimeseries([]string{labels.MetricName, "other_1", "job", "job-1", "service", "service-1"}, makeSamples(0, 0), nil)
+
+		// To keep assertions simple, all tests push all series, and then request the cardinality of the same label names,
+		// so we expect the same response from each successful test.
+		reqLabelNames = []model.LabelName{"job", "service"}
+		expectedRes   = []*client.LabelValueSeriesCount{
+			{
+				LabelName:        "job",
+				LabelValueSeries: map[string]uint64{"job-a": 3, "job-b": 2, "job-c": 1},
+			}, {
+				LabelName:        "service",
+				LabelValueSeries: map[string]uint64{"service-1": 4, "service-2": 1},
+			},
+		}
+	)
+
+	tests := map[string]struct {
+		ingesterStateByZone map[string]ingesterZoneState
+		ingesterDataByZone  map[string][]*mimirpb.WriteRequest
+		shardSize           int
+		expectedErr         error
+	}{
+		"single zone, 3 ingesters, series successfully replicated to 3 ingesters": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"single-zone": {numIngesters: 3, happyIngesters: 3},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"single-zone": {
+					makeWriteRequestWith(series1, series2, series3, series4, series5, series6),
+					makeWriteRequestWith(series1, series2, series3, series4, series5, series6),
+					makeWriteRequestWith(series1, series2, series3, series4, series5, series6),
+				},
+			},
+		},
+		"single zone, 6 ingesters, series successfully replicated to 3 ingesters": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"single-zone": {numIngesters: 6, happyIngesters: 6},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"single-zone": {
+					makeWriteRequestWith(series1, series2, series3),
+					makeWriteRequestWith(series1, series2, series3),
+					makeWriteRequestWith(series1, series2, series3),
+					makeWriteRequestWith(series4, series5, series6),
+					makeWriteRequestWith(series4, series5, series6),
+					makeWriteRequestWith(series4, series5, series6),
+				},
+			},
+		},
+		"single zone, 6 ingesters, 2 ingesters in LEAVING state": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"single-zone": {numIngesters: 6, happyIngesters: 6, ringStates: []ring.InstanceState{ring.LEAVING, ring.LEAVING, ring.ACTIVE, ring.ACTIVE, ring.ACTIVE, ring.ACTIVE}},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"single-zone": {
+					makeWriteRequestWith(series1, series2, series3),
+					makeWriteRequestWith(series1, series2, series3),
+					makeWriteRequestWith(series1, series2, series3),
+					makeWriteRequestWith(series4, series5, series6),
+					makeWriteRequestWith(series4, series5, series6),
+					makeWriteRequestWith(series4, series5, series6),
+				},
+			},
+			expectedErr: ring.ErrTooManyUnhealthyInstances,
+		},
+		"single zone, 6 ingesters, 1 ingester is UNHEALTHY": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"single-zone": {numIngesters: 6, happyIngesters: 5},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"single-zone": {
+					makeWriteRequestWith(series1, series2, series3),
+					makeWriteRequestWith(series1, series2, series3),
+					makeWriteRequestWith(series1, series2, series3),
+					makeWriteRequestWith(series4, series5, series6),
+					makeWriteRequestWith(series4, series5, series6),
+					nil,
+				},
+			},
+			expectedErr: errFail,
+		},
+		"multi zone, 3 ingesters, every series successfully replicated to 3 ingesters": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {numIngesters: 1, happyIngesters: 1},
+				"zone-b": {numIngesters: 1, happyIngesters: 1},
+				"zone-c": {numIngesters: 1, happyIngesters: 1},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					makeWriteRequestWith(series1, series2, series3, series4, series5, series6),
+				},
+				"zone-b": {
+					makeWriteRequestWith(series1, series2, series3, series4, series5, series6),
+				},
+				"zone-c": {
+					makeWriteRequestWith(series1, series2, series3, series4, series5, series6),
+				},
+			},
+		},
+		"multi zone, 3 ingesters, every series successfully replicated only to 2 ingesters across 2 zones": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {numIngesters: 1, happyIngesters: 1},
+				"zone-b": {numIngesters: 1, happyIngesters: 1},
+				"zone-c": {numIngesters: 1, happyIngesters: 1},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					makeWriteRequestWith(series1, series2, series3, series4, series5, series6),
+				},
+				"zone-b": {
+					makeWriteRequestWith(series1, series2, series3, series4, series5, series6),
+				},
+				"zone-c": {
+					nil,
+				},
+			},
+		},
+		"multi zone, 6 ingesters, all ingesters in 1 zone are in LEAVING state": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {numIngesters: 2, happyIngesters: 2, ringStates: []ring.InstanceState{ring.LEAVING, ring.LEAVING}},
+				"zone-b": {numIngesters: 2, happyIngesters: 2},
+				"zone-c": {numIngesters: 2, happyIngesters: 2},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					makeWriteRequestWith(series1, series2, series3, series4, series5),
+					makeWriteRequestWith(series6),
+				},
+				"zone-b": {
+					makeWriteRequestWith(series1, series2, series3, series4),
+					makeWriteRequestWith(series5, series6),
+				},
+				"zone-c": {
+					makeWriteRequestWith(series1, series2, series3),
+					makeWriteRequestWith(series4, series5, series6),
+				},
+			},
+		},
+		"multi zone, 6 ingesters, all ingesters in 2 zones are in LEAVING state": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {numIngesters: 2, happyIngesters: 2, ringStates: []ring.InstanceState{ring.LEAVING, ring.LEAVING}},
+				"zone-b": {numIngesters: 2, happyIngesters: 2, ringStates: []ring.InstanceState{ring.LEAVING, ring.LEAVING}},
+				"zone-c": {numIngesters: 2, happyIngesters: 2},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					makeWriteRequestWith(series1, series2, series3, series4, series5),
+					makeWriteRequestWith(series6),
+				},
+				"zone-b": {
+					makeWriteRequestWith(series1, series2, series3, series4),
+					makeWriteRequestWith(series5, series6),
+				},
+				"zone-c": {
+					makeWriteRequestWith(series1, series2, series3),
+					makeWriteRequestWith(series4, series5, series6),
+				},
+			},
+			expectedErr: ring.ErrTooManyUnhealthyInstances,
+		},
+		"multi zone, 6 ingesters, all ingesters in 1 zone are UNHEALTHY": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {numIngesters: 2, happyIngesters: 0},
+				"zone-b": {numIngesters: 2, happyIngesters: 2},
+				"zone-c": {numIngesters: 2, happyIngesters: 2},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					nil,
+					nil,
+				},
+				"zone-b": {
+					makeWriteRequestWith(series1, series2, series3, series4),
+					makeWriteRequestWith(series5, series6),
+				},
+				"zone-c": {
+					makeWriteRequestWith(series1, series2, series3),
+					makeWriteRequestWith(series4, series5, series6),
+				},
+			},
+		},
+		"multi zone, 6 ingesters, 1 UNHEALTHY ingester in 2 zones": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {numIngesters: 2, happyIngesters: 1},
+				"zone-b": {numIngesters: 2, happyIngesters: 1},
+				"zone-c": {numIngesters: 2, happyIngesters: 2},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					makeWriteRequestWith(series1, series2, series3, series4, series5),
+					nil,
+				},
+				"zone-b": {
+					makeWriteRequestWith(series1, series2, series3, series4),
+					nil,
+				},
+				"zone-c": {
+					makeWriteRequestWith(series1, series2, series3),
+					makeWriteRequestWith(series4, series5, series6),
+				},
+			},
+			expectedErr: errFail,
+		},
+		"multi zone, 6 ingesters, 1 LEAVING ingester per zone, but the LEAVING ingesters are not part of tenant's shard": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {numIngesters: 2, happyIngesters: 2, ringStates: []ring.InstanceState{ring.ACTIVE, ring.LEAVING}},
+				"zone-b": {numIngesters: 2, happyIngesters: 2, ringStates: []ring.InstanceState{ring.ACTIVE, ring.LEAVING}},
+				"zone-c": {numIngesters: 2, happyIngesters: 2, ringStates: []ring.InstanceState{ring.ACTIVE, ring.LEAVING}},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					makeWriteRequestWith(series1, series2, series3, series4, series5, series6),
+					makeWriteRequestWith(other1), // Not belonging to tenant's shard.
+				},
+				"zone-b": {
+					makeWriteRequestWith(series1, series2, series3, series4, series5, series6),
+					makeWriteRequestWith(other1), // Not belonging to tenant's shard.
+				},
+				"zone-c": {
+					makeWriteRequestWith(series1, series2, series3, series4, series5, series6),
+					makeWriteRequestWith(other1), // Not belonging to tenant's shard.
+				},
+			},
+			shardSize: 1, // Tenant's shard made of: ingester-zone-a-0, ingester-zone-b-0 and ingester-zone-c-0.
+		},
+		"multi zone, 6 ingesters, 1 UNHEALTHY ingester per zone, but the UNHEALTHY ingesters are not part of tenant's shard": {
+			ingesterStateByZone: map[string]ingesterZoneState{
+				"zone-a": {states: []ingesterState{ingesterStateHappy, ingesterStateFailed}},
+				"zone-b": {states: []ingesterState{ingesterStateHappy, ingesterStateFailed}},
+				"zone-c": {states: []ingesterState{ingesterStateHappy, ingesterStateFailed}},
+			},
+			ingesterDataByZone: map[string][]*mimirpb.WriteRequest{
+				"zone-a": {
+					makeWriteRequestWith(series1, series2, series3, series4, series5, series6),
+					nil,
+				},
+				"zone-b": {
+					makeWriteRequestWith(series1, series2, series3, series4, series5, series6),
+					nil,
+				},
+				"zone-c": {
+					makeWriteRequestWith(series1, series2, series3, series4, series5, series6),
+					nil,
+				},
+			},
+			shardSize: 1, // Tenant's shard made of: ingester-zone-a-0, ingester-zone-b-0 and ingester-zone-c-0.
+		},
+	}
+
+	for testName, testData := range tests {
+		testData := testData
+
+		t.Run(testName, func(t *testing.T) {
+			t.Parallel()
+
+			for _, minimizeIngesterRequests := range []bool{false, true} {
+				minimizeIngesterRequests := minimizeIngesterRequests
+
+				t.Run(fmt.Sprintf("minimize ingester requests: %t", minimizeIngesterRequests), func(t *testing.T) {
+					t.Parallel()
+
+					// Create distributor.
+					distributors, _, _, _ := prepare(t, prepConfig{
+						ingesterStateByZone: testData.ingesterStateByZone,
+						ingesterDataByZone:  testData.ingesterDataByZone,
+						numDistributors:     1,
+						shuffleShardSize:    testData.shardSize,
+						configure: func(config *Config) {
+							config.MinimizeIngesterRequests = minimizeIngesterRequests
+						},
+					})
+
+					// Fetch label values cardinality.
+					ctx := user.InjectOrgID(context.Background(), "test")
+					_, res, err := distributors[0].LabelValuesCardinality(ctx, reqLabelNames, nil, cardinality.InMemoryMethod)
+
+					if testData.expectedErr != nil {
+						require.ErrorIs(t, err, testData.expectedErr)
+						return
+					}
+
+					require.NoError(t, err)
+					assert.ElementsMatch(t, expectedRes, res.Items)
+				})
+			}
+		})
+	}
+}
+
+func TestDistributor_LabelValuesCardinality_Limit(t *testing.T) {
 	fixtures := []struct {
 		labels    labels.Labels
 		value     float64
@@ -2822,7 +4240,7 @@ func TestDistributor_LabelValuesCardinalityLimit(t *testing.T) {
 			limits := validation.Limits{}
 			flagext.DefaultValues(&limits)
 			limits.LabelValuesMaxCardinalityLabelNamesPerRequest = testData.maxLabelNamesPerRequest
-			ds, _, _ := prepare(t, prepConfig{
+			ds, _, _, _ := prepare(t, prepConfig{
 				numIngesters:    3,
 				happyIngesters:  3,
 				numDistributors: 1,
@@ -2853,7 +4271,7 @@ func TestDistributor_LabelValuesCardinality_Concurrency(t *testing.T) {
 
 	t.Run("should fail with an error if at least one ingester's LabelValuesCardinality and/or UserStats operations fails", func(t *testing.T) {
 		// Create distributor
-		ds, ingesters, _ := prepare(t, prepConfig{
+		ds, ingesters, _, _ := prepare(t, prepConfig{
 			numIngesters:    numIngesters,
 			happyIngesters:  numIngesters,
 			numDistributors: 1,
@@ -2971,6 +4389,12 @@ func TestHaDedupeMiddleware(t *testing.T) {
 				cleanupCallCount++
 			}
 
+			duplicateCleanup := func() {
+				// If we get here, that means the middleware called `next`
+				// (which will call `CleanUp`) and then called `CleanUp` again.
+				assert.Fail(t, "cleanup called twice")
+			}
+
 			nextCallCount := 0
 			var gotReqs []*mimirpb.WriteRequest
 			next := func(ctx context.Context, pushReq *Request) error {
@@ -2979,6 +4403,7 @@ func TestHaDedupeMiddleware(t *testing.T) {
 				require.NoError(t, err)
 				gotReqs = append(gotReqs, req)
 				pushReq.CleanUp()
+				pushReq.AddCleanup(duplicateCleanup)
 				return nil
 			}
 
@@ -2988,7 +4413,7 @@ func TestHaDedupeMiddleware(t *testing.T) {
 			limits.MaxLabelValueLength = 15
 			limits.HAMaxClusters = 1
 
-			ds, _, _ := prepare(t, prepConfig{
+			ds, _, _, _ := prepare(t, prepConfig{
 				numDistributors: 1,
 				limits:          &limits,
 				enableTracker:   tc.enableHaTracker,
@@ -3053,7 +4478,7 @@ func TestInstanceLimitsBeforeHaDedupe(t *testing.T) {
 	limits.MaxLabelValueLength = 15
 
 	// Prepare distributor and wrap the mock push function with its middlewares.
-	ds, _, _ := prepare(t, prepConfig{
+	ds, _, _, _ := prepare(t, prepConfig{
 		numDistributors: 1,
 		limits:          &limits,
 		enableTracker:   true,
@@ -3089,40 +4514,53 @@ func TestRelabelMiddleware(t *testing.T) {
 	ctxWithUser := user.InjectOrgID(context.Background(), "user")
 
 	type testCase struct {
-		name           string
-		ctx            context.Context
-		relabelConfigs []*relabel.Config
-		dropLabels     []string
-		reqs           []*mimirpb.WriteRequest
-		expectedReqs   []*mimirpb.WriteRequest
-		expectErrs     []bool
+		name              string
+		ctx               context.Context
+		relabelConfigs    []*relabel.Config
+		dropLabels        []string
+		relabelingEnabled bool
+		reqs              []*mimirpb.WriteRequest
+		expectedReqs      []*mimirpb.WriteRequest
+		expectErrs        []bool
 	}
 	testCases := []testCase{
 		{
-			name:           "do nothing",
-			ctx:            ctxWithUser,
-			relabelConfigs: nil,
-			dropLabels:     nil,
-			reqs:           []*mimirpb.WriteRequest{makeWriteRequestForGenerators(5, labelSetGenForStringPairs(t, "__name__", "metric1", "label", "value_%d"), nil, nil)},
-			expectedReqs:   []*mimirpb.WriteRequest{makeWriteRequestForGenerators(5, labelSetGenForStringPairs(t, "__name__", "metric1", "label", "value_%d"), nil, nil)},
-			expectErrs:     []bool{false},
+			name:              "do nothing",
+			ctx:               ctxWithUser,
+			relabelConfigs:    nil,
+			dropLabels:        nil,
+			relabelingEnabled: true,
+			reqs:              []*mimirpb.WriteRequest{makeWriteRequestForGenerators(5, labelSetGenForStringPairs(t, "__name__", "metric1", "label", "value_%d"), nil, nil)},
+			expectedReqs:      []*mimirpb.WriteRequest{makeWriteRequestForGenerators(5, labelSetGenForStringPairs(t, "__name__", "metric1", "label", "value_%d"), nil, nil)},
+			expectErrs:        []bool{false},
 		}, {
-			name:           "no user in context",
-			ctx:            context.Background(),
-			relabelConfigs: nil,
-			dropLabels:     nil,
-			reqs:           []*mimirpb.WriteRequest{makeWriteRequestForGenerators(5, labelSetGenForStringPairs(t, "__name__", "metric1", "label", "value_%d"), nil, nil)},
-			expectedReqs:   nil,
-			expectErrs:     []bool{true},
+			name:              "no user in context",
+			ctx:               context.Background(),
+			relabelConfigs:    nil,
+			dropLabels:        nil,
+			relabelingEnabled: true,
+			reqs:              []*mimirpb.WriteRequest{makeWriteRequestForGenerators(5, labelSetGenForStringPairs(t, "__name__", "metric1", "label", "value_%d"), nil, nil)},
+			expectedReqs:      nil,
+			expectErrs:        []bool{true},
 		}, {
-			name:           "apply a relabel rule",
-			ctx:            ctxWithUser,
-			relabelConfigs: nil,
-			dropLabels:     []string{"label1", "label3"},
-			reqs:           []*mimirpb.WriteRequest{makeWriteRequestForGenerators(5, labelSetGenForStringPairs(t, "__name__", "metric1", "label1", "value1", "label2", "value2", "label3", "value3"), nil, nil)},
-			expectedReqs:   []*mimirpb.WriteRequest{makeWriteRequestForGenerators(5, labelSetGenForStringPairs(t, "__name__", "metric1", "label2", "value2"), nil, nil)},
-			expectErrs:     []bool{false},
+			name:              "apply a relabel rule",
+			ctx:               ctxWithUser,
+			relabelConfigs:    nil,
+			dropLabels:        []string{"label1", "label3"},
+			relabelingEnabled: true,
+			reqs:              []*mimirpb.WriteRequest{makeWriteRequestForGenerators(5, labelSetGenForStringPairs(t, "__name__", "metric1", "label1", "value1", "label2", "value2", "label3", "value3"), nil, nil)},
+			expectedReqs:      []*mimirpb.WriteRequest{makeWriteRequestForGenerators(5, labelSetGenForStringPairs(t, "__name__", "metric1", "label2", "value2"), nil, nil)},
+			expectErrs:        []bool{false},
 		}, {
+			name:              "relabeling disabled",
+			ctx:               ctxWithUser,
+			relabelConfigs:    nil,
+			dropLabels:        []string{"label1", "label3"},
+			relabelingEnabled: false,
+			reqs:              []*mimirpb.WriteRequest{makeWriteRequestForGenerators(5, labelSetGenForStringPairs(t, "__name__", "metric1", "label1", "value1", "label2", "value2", "label3", "value3"), nil, nil)},
+			expectedReqs:      []*mimirpb.WriteRequest{makeWriteRequestForGenerators(5, labelSetGenForStringPairs(t, "__name__", "metric1", "label1", "value1", "label2", "value2", "label3", "value3"), nil, nil)},
+			expectErrs:        []bool{false},
+		}, {}, {
 			name: "drop two out of three labels",
 			ctx:  ctxWithUser,
 			relabelConfigs: []*relabel.Config{
@@ -3134,13 +4572,15 @@ func TestRelabelMiddleware(t *testing.T) {
 					Replacement:  "prefix_$1",
 				},
 			},
-			reqs:         []*mimirpb.WriteRequest{makeWriteRequestForGenerators(5, labelSetGenForStringPairs(t, "__name__", "metric1", "label1", "value1"), nil, nil)},
-			expectedReqs: []*mimirpb.WriteRequest{makeWriteRequestForGenerators(5, labelSetGenForStringPairs(t, "__name__", "metric1", "label1", "value1", "target", "prefix_value1"), nil, nil)},
-			expectErrs:   []bool{false},
+			relabelingEnabled: true,
+			reqs:              []*mimirpb.WriteRequest{makeWriteRequestForGenerators(5, labelSetGenForStringPairs(t, "__name__", "metric1", "label1", "value1"), nil, nil)},
+			expectedReqs:      []*mimirpb.WriteRequest{makeWriteRequestForGenerators(5, labelSetGenForStringPairs(t, "__name__", "metric1", "label1", "value1", "target", "prefix_value1"), nil, nil)},
+			expectErrs:        []bool{false},
 		}, {
-			name:       "drop entire series if they have no labels",
-			ctx:        ctxWithUser,
-			dropLabels: []string{"__name__", "label2", "label3"},
+			name:              "drop entire series if they have no labels",
+			ctx:               ctxWithUser,
+			dropLabels:        []string{"__name__", "label2", "label3"},
+			relabelingEnabled: true,
 			reqs: []*mimirpb.WriteRequest{
 				makeWriteRequestForGenerators(5, labelSetGenForStringPairs(t, "__name__", "metric1", "label1", "value1"), nil, nil),
 				makeWriteRequestForGenerators(5, labelSetGenForStringPairs(t, "__name__", "metric2", "label2", "value2"), nil, nil),
@@ -3166,25 +4606,26 @@ func TestRelabelMiddleware(t *testing.T) {
 					Replacement:  "$1",
 				},
 			},
+			relabelingEnabled: true,
 			reqs: []*mimirpb.WriteRequest{{
-				Timeseries: []mimirpb.PreallocTimeseries{makeWriteRequestTimeseries(
-					[]mimirpb.LabelAdapter{
-						{Name: model.MetricNameLabel, Value: "metric1"},
-						{Name: "label1", Value: "value1"},
+				Timeseries: []mimirpb.PreallocTimeseries{makeTimeseries(
+					[]string{
+						model.MetricNameLabel, "metric1",
+						"label1", "value1",
 					},
-					123,
-					1.23,
+					makeSamples(123, 1.23),
+					nil,
 				)},
 			}},
 			expectedReqs: []*mimirpb.WriteRequest{{
-				Timeseries: []mimirpb.PreallocTimeseries{makeWriteRequestTimeseries(
-					[]mimirpb.LabelAdapter{
-						{Name: model.MetricNameLabel, Value: "metric1"},
-						{Name: "label1", Value: "value1"},
-						{Name: "tenant_id", Value: "user"},
+				Timeseries: []mimirpb.PreallocTimeseries{makeTimeseries(
+					[]string{
+						model.MetricNameLabel, "metric1",
+						"label1", "value1",
+						"tenant_id", "user",
 					},
-					123,
-					1.23,
+					makeSamples(123, 1.23),
+					nil,
 				)},
 			}},
 			expectErrs: []bool{false},
@@ -3198,12 +4639,19 @@ func TestRelabelMiddleware(t *testing.T) {
 				cleanupCallCount++
 			}
 
+			duplicateCleanup := func() {
+				// If we get here, that means the middleware called `next`
+				// (which will call `CleanUp`) and then called `CleanUp` again.
+				assert.Fail(t, "cleanup called twice")
+			}
+
 			var gotReqs []*mimirpb.WriteRequest
 			next := func(ctx context.Context, pushReq *Request) error {
 				req, err := pushReq.WriteRequest()
 				require.NoError(t, err)
 				gotReqs = append(gotReqs, req)
 				pushReq.CleanUp()
+				pushReq.AddCleanup(duplicateCleanup)
 				return nil
 			}
 
@@ -3211,11 +4659,87 @@ func TestRelabelMiddleware(t *testing.T) {
 			flagext.DefaultValues(&limits)
 			limits.MetricRelabelConfigs = tc.relabelConfigs
 			limits.DropLabels = tc.dropLabels
-			ds, _, _ := prepare(t, prepConfig{
+			limits.MetricRelabelingEnabled = tc.relabelingEnabled
+			ds, _, _, _ := prepare(t, prepConfig{
 				numDistributors: 1,
 				limits:          &limits,
 			})
 			middleware := ds[0].prePushRelabelMiddleware(next)
+
+			var gotErrs []bool
+			for _, req := range tc.reqs {
+				pushReq := NewParsedRequest(req)
+				pushReq.AddCleanup(cleanup)
+				err := middleware(tc.ctx, pushReq)
+				gotErrs = append(gotErrs, err != nil)
+			}
+
+			assert.Equal(t, tc.expectedReqs, gotReqs)
+			assert.Equal(t, tc.expectErrs, gotErrs)
+
+			// Cleanup must have been called once per request.
+			assert.Equal(t, len(tc.reqs), cleanupCallCount)
+		})
+	}
+}
+
+func TestSortAndFilterMiddleware(t *testing.T) {
+	ctxWithUser := user.InjectOrgID(context.Background(), "user")
+
+	type testCase struct {
+		name         string
+		ctx          context.Context
+		reqs         []*mimirpb.WriteRequest
+		expectedReqs []*mimirpb.WriteRequest
+		expectErrs   []bool
+	}
+	testCases := []testCase{
+		{
+			name:         "unsorted labels",
+			ctx:          ctxWithUser,
+			reqs:         []*mimirpb.WriteRequest{makeWriteRequestForGenerators(5, labelSetGenForStringPairs(t, "__name__", "metric1", "labelb", "valueb", "labela", "valuea"), nil, nil)},
+			expectedReqs: []*mimirpb.WriteRequest{makeWriteRequestForGenerators(5, labelSetGenForStringPairs(t, "__name__", "metric1", "labela", "valuea", "labelb", "valueb"), nil, nil)},
+			expectErrs:   []bool{false},
+		},
+		{
+			name:         "empty labels",
+			ctx:          ctxWithUser,
+			reqs:         []*mimirpb.WriteRequest{makeWriteRequestForGenerators(5, labelSetGenWithEmptyLabels("metric1", "empty"), nil, nil)},
+			expectedReqs: []*mimirpb.WriteRequest{makeWriteRequestForGenerators(5, labelSetGenWithEmptyLabels("metric1"), nil, nil)},
+			expectErrs:   []bool{false},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cleanupCallCount := 0
+			cleanup := func() {
+				cleanupCallCount++
+			}
+
+			duplicateCleanup := func() {
+				// If we get here, that means the middleware called `next`
+				// (which will call `CleanUp`) and then called `CleanUp` again.
+				assert.Fail(t, "cleanup called twice")
+			}
+
+			var gotReqs []*mimirpb.WriteRequest
+			next := func(ctx context.Context, pushReq *Request) error {
+				req, err := pushReq.WriteRequest()
+				require.NoError(t, err)
+				gotReqs = append(gotReqs, req)
+				pushReq.CleanUp()
+				pushReq.AddCleanup(duplicateCleanup)
+				return nil
+			}
+
+			var limits validation.Limits
+			flagext.DefaultValues(&limits)
+			ds, _, _, _ := prepare(t, prepConfig{
+				numDistributors: 1,
+				limits:          &limits,
+			})
+			middleware := ds[0].prePushSortAndFilterMiddleware(next)
 
 			var gotErrs []bool
 			for _, req := range tc.reqs {
@@ -3254,122 +4778,398 @@ func mockWriteRequest(lbls labels.Labels, value float64, timestampMs int64) *mim
 	return mimirpb.ToWriteRequest([][]mimirpb.LabelAdapter{mimirpb.FromLabelsToLabelAdapters(lbls)}, samples, nil, nil, mimirpb.API)
 }
 
-type prepConfig struct {
+type ingesterState int
+
+const (
+	ingesterStateHappy = ingesterState(iota)
+	ingesterStateFailed
+)
+
+type ingesterZoneState struct {
+	// numIngesters and happyIngesters are superseded by states
 	numIngesters, happyIngesters int
-	queryDelay                   time.Duration
-	pushDelay                    time.Duration
-	shuffleShardSize             int
-	limits                       *validation.Limits
-	numDistributors              int
+
+	// states explicitly sets the state of each ingester.
+	// states takes precedence over numIngesters and happyIngesters
+	states []ingesterState
+
+	// ringStates explicitly sets the state of each ingester in the ring.
+	// If unset, instances will be in ring.ACTIVE state.
+	ringStates []ring.InstanceState
+}
+
+type prepConfig struct {
+	// numIngesters, happyIngesters, and ingesterZones are superseded by ingesterStateByZone
+	numIngesters, happyIngesters int
+	ingesterZones                []string
+
+	// ingesterStateByZone supersedes numIngesters, happyIngesters, and ingesterZones
+	ingesterStateByZone map[string]ingesterZoneState
+
+	// ingesterDataByZone:
+	//   map[zone-a][0] -> ingester-zone-a-0 write request
+	//   map[zone-a][1] -> ingester-zone-a-1 write request
+	// Each zone in ingesterDataByZone can be shorter than the actual number of ingesters for the zone, but it cannot be longer.
+	// If a request is nil, sending a request to the ingester is skipped.
+	ingesterDataByZone map[string][]*mimirpb.WriteRequest
+
+	// ingesterDataTenantID is the tenant under which ingesterDataByZone is pushed
+	ingesterDataTenantID string
+
+	queryDelay       time.Duration
+	pushDelay        time.Duration
+	shuffleShardSize int
+	limits           *validation.Limits
+	numDistributors  int
 
 	replicationFactor                  int
 	enableTracker                      bool
-	ingestersSeriesCountTotal          uint64
-	ingesterZones                      []string
 	labelNamesStreamZonesResponseDelay map[string]time.Duration
 
 	configure func(*Config)
 
-	timeOut bool
+	timeOut            bool
+	circuitBreakerOpen bool
+
+	// Ingest storage specific configuration.
+	ingestStorageEnabled    bool
+	ingestStoragePartitions int32 // Number of partitions. Auto-detected from configured ingesters if not explicitly set.
+	ingestStorageKafka      *kfake.Cluster
+
+	// We need this setting to simulate a response from ingesters that didn't support responding
+	// with a stream of chunks, and were responding with chunk series instead. This is needed to
+	// ensure backwards compatibility, i.e., that queriers can still correctly handle both types
+	// or responses.
+	disableStreamingResponse bool
 }
 
-func prepare(t *testing.T, cfg prepConfig) ([]*Distributor, []mockIngester, []*prometheus.Registry) {
-	ingesters := []mockIngester{}
-	for i := 0; i < cfg.happyIngesters; i++ {
-		zone := ""
-		if len(cfg.ingesterZones) > 0 {
-			zone = cfg.ingesterZones[i%len(cfg.ingesterZones)]
+// totalIngesters takes into account ingesterStateByZone and numIngesters.
+func (c prepConfig) totalIngesters() int {
+	if len(c.ingesterStateByZone) == 0 {
+		return c.numIngesters
+	}
+	n := 0
+	for _, s := range c.ingesterStateByZone {
+		if s.states != nil {
+			n += len(s.states)
+		} else {
+			n += s.numIngesters
 		}
+	}
+	return n
+}
+
+// totalZones takes into account ingesterStateByZone and ingesterZones.
+// If there were no explicit zones, then totalZones returns 1.
+func (c prepConfig) totalZones() int {
+	if len(c.ingesterStateByZone) == 0 {
+		evenlyAssignedZones := len(c.ingesterZones)
+		if evenlyAssignedZones == 0 {
+			return 1
+		}
+		return evenlyAssignedZones
+	}
+	return len(c.ingesterStateByZone)
+}
+
+// maxIngestersPerZone returns the max number of ingester per zone. For example,
+// if a zone has 2 ingesters and another zone has 3 ingesters, this function will
+// return 3.
+func (c prepConfig) maxIngestersPerZone() int {
+	maxIngestersPerZone := c.numIngesters
+
+	for _, state := range c.ingesterStateByZone {
+		maxIngestersPerZone = max(maxIngestersPerZone, max(state.numIngesters, len(state.states)))
+	}
+
+	return maxIngestersPerZone
+}
+
+func (c prepConfig) ingesterRingState(zone string, id int) ring.InstanceState {
+	if len(c.ingesterStateByZone[zone].ringStates) == 0 {
+		return ring.ACTIVE
+	}
+	return c.ingesterStateByZone[zone].ringStates[id]
+}
+
+func (c prepConfig) validate(t testing.TB) {
+	if len(c.ingesterStateByZone) != 0 {
+		require.Zero(t, c.numIngesters, "ingesterStateByZone and numIngesters/happyIngesters are exclusive")
+		require.Zero(t, c.happyIngesters, "ingesterStateByZone and numIngesters/happyIngesters are exclusive")
+		require.Nil(t, c.ingesterZones, "ingesterStateByZone and numIngesters/happyIngesters are exclusive")
+
+		for zone, state := range c.ingesterStateByZone {
+			ingestersInZone := state.numIngesters
+			if state.states != nil {
+				require.Zero(t, state.numIngesters, "ingesterStateByZone's states and numIngesters/happyIngesters are exclusive")
+				require.Zero(t, state.happyIngesters, "ingesterStateByZone's states and numIngesters/happyIngesters are exclusive")
+				ingestersInZone = len(state.states)
+			}
+			if len(state.ringStates) > 0 {
+				require.Len(t, state.ringStates, ingestersInZone, "ringStates cannot be longer than the number of ingesters in the zone")
+			}
+			require.LessOrEqual(t, len(c.ingesterDataByZone[zone]), ingestersInZone, "ingesterDataPerZone cannot be longer than the number of ingesters in the zone")
+		}
+	}
+}
+
+func prepareIngesters(t testing.TB, cfg prepConfig) []*mockIngester {
+	if len(cfg.ingesterStateByZone) != 0 {
+		ingesters := []*mockIngester(nil)
+		for zone, state := range cfg.ingesterStateByZone {
+			ingesters = append(ingesters, prepareIngesterZone(t, zone, state, cfg)...)
+		}
+		return ingesters
+	}
+	ingesters := []*mockIngester(nil)
+	numZones := len(cfg.ingesterZones)
+	if numZones == 0 {
+		return prepareIngesterZone(t, "", ingesterZoneState{numIngesters: cfg.numIngesters, happyIngesters: cfg.happyIngesters}, cfg)
+	}
+	for zoneIdx, zone := range cfg.ingesterZones {
+		state := ingesterZoneState{
+			numIngesters:   cfg.numIngesters / numZones,
+			happyIngesters: cfg.happyIngesters / numZones,
+		}
+		if zoneIdx < cfg.happyIngesters%numZones {
+			// Account for cases where the number of happy ingesters isn't divisible by numZones.
+			// For example, when there are 3 zones, 9 ingesters, and 8 happy ingesters.
+			// In this case ingester-zone-c-2 (the last ingester) is the unhappy ingester.
+			state.happyIngesters++
+		}
+
+		if zoneIdx < cfg.numIngesters%numZones {
+			// Account for cases where the number of ingesters isn't divisible by numZones.
+			// For example, when there are 3 zones and 11 ingesters.
+			// In this case the distribution of replicas is zone-a: 4, zone-b: 4, zone-c: 3.
+			state.numIngesters++
+		}
+
+		ingesters = append(ingesters, prepareIngesterZone(t, zone, state, cfg)...)
+	}
+	return ingesters
+
+}
+
+func prepareIngesterZone(t testing.TB, zone string, state ingesterZoneState, cfg prepConfig) []*mockIngester {
+	ingesters := []*mockIngester(nil)
+
+	if state.states == nil {
+		state.states = make([]ingesterState, state.numIngesters)
+		for i := 0; i < state.happyIngesters; i++ {
+			state.states[i] = ingesterStateHappy
+		}
+		for i := state.happyIngesters; i < state.numIngesters; i++ {
+			state.states[i] = ingesterStateFailed
+		}
+	}
+
+	for i, s := range state.states {
 		var labelNamesStreamResponseDelay time.Duration
 		if len(cfg.labelNamesStreamZonesResponseDelay) > 0 {
 			labelNamesStreamResponseDelay = cfg.labelNamesStreamZonesResponseDelay[zone]
 		}
-		ingesters = append(ingesters, mockIngester{
-			happy:                         true,
+
+		ingester := &mockIngester{
+			id:                            i,
+			happy:                         s == ingesterStateHappy,
 			queryDelay:                    cfg.queryDelay,
 			pushDelay:                     cfg.pushDelay,
-			seriesCountTotal:              cfg.ingestersSeriesCountTotal,
 			zone:                          zone,
 			labelNamesStreamResponseDelay: labelNamesStreamResponseDelay,
 			timeOut:                       cfg.timeOut,
-		})
-	}
-	for i := cfg.happyIngesters; i < cfg.numIngesters; i++ {
-		ingesters = append(ingesters, mockIngester{
-			queryDelay:       cfg.queryDelay,
-			pushDelay:        cfg.pushDelay,
-			seriesCountTotal: cfg.ingestersSeriesCountTotal,
-		})
+			circuitBreakerOpen:            cfg.circuitBreakerOpen,
+			disableStreamingResponse:      cfg.disableStreamingResponse,
+		}
+
+		// Init the partition reader if the ingest storage is enabled.
+		// This is required to let each mocked ingester to consume their own partition.
+		if cfg.ingestStorageEnabled {
+			var err error
+
+			kafkaCfg := ingest.KafkaConfig{}
+			flagext.DefaultValues(&kafkaCfg)
+			kafkaCfg.Address = cfg.ingestStorageKafka.ListenAddrs()[0]
+			kafkaCfg.Topic = kafkaTopic
+			kafkaCfg.LastProducedOffsetPollInterval = 100 * time.Millisecond
+			kafkaCfg.LastProducedOffsetRetryTimeout = 100 * time.Millisecond
+
+			ingester.partitionReader, err = ingest.NewPartitionReaderForPusher(kafkaCfg, ingester.partitionID(), ingester.instanceID(), newMockIngesterPusherAdapter(ingester), log.NewNopLogger(), nil)
+			require.NoError(t, err)
+
+			// We start it async, and then we wait until running in a defer so that multiple partition
+			// readers will be started concurrently.
+			require.NoError(t, ingester.partitionReader.StartAsync(context.Background()))
+
+			t.Cleanup(func() {
+				require.NoError(t, services.StopAndAwaitTerminated(context.Background(), ingester.partitionReader))
+			})
+		}
+
+		ingesters = append(ingesters, ingester)
 	}
 
-	// Use a real ring with a mock KV store to test ring RF logic.
+	// Wait until all partition readers have started.
+	if cfg.ingestStorageEnabled {
+		for _, ingester := range ingesters {
+			require.NoError(t, ingester.partitionReader.AwaitRunning(context.Background()))
+		}
+	}
+
+	return ingesters
+}
+
+func prepareRingInstances(cfg prepConfig, ingesters []*mockIngester) *ring.Desc {
 	ingesterDescs := map[string]ring.InstanceDesc{}
-	ingestersByAddr := map[string]*mockIngester{}
+
 	for i := range ingesters {
-		addr := fmt.Sprintf("%d", i)
-		tokens := []uint32{uint32((math.MaxUint32 / cfg.numIngesters) * i)}
+		addr := ingesters[i].address()
+		tokens := []uint32{uint32((math.MaxUint32 / len(ingesters)) * i)}
 		ingesterDescs[addr] = ring.InstanceDesc{
 			Addr:                addr,
 			Zone:                ingesters[i].zone,
-			State:               ring.ACTIVE,
+			State:               cfg.ingesterRingState(ingesters[i].zone, ingesters[i].id),
 			Timestamp:           time.Now().Unix(),
-			RegisteredTimestamp: time.Now().Add(-2 * time.Hour).Unix(),
+			RegisteredTimestamp: time.Now().Add(-2 * time.Hour).Unix(), // registered before the shuffle sharding lookback period, so we don't start including other ingesters
 			Tokens:              tokens,
 		}
-		ingestersByAddr[addr] = &ingesters[i]
 		ingesters[i].tokens = tokens
 	}
+	return &ring.Desc{Ingesters: ingesterDescs}
+}
 
-	kvStore, closer := consul.NewInMemoryClient(ring.GetCodec(), log.NewNopLogger(), nil)
+func preparePartitionsRing(cfg prepConfig, ingesters []*mockIngester) *ring.PartitionRingDesc {
+	desc := ring.NewPartitionRingDesc()
+
+	// When we add partitions we simulate the case they were switched to ACTIVE before
+	// the shuffle sharding lookback period, so that we don't extend partitions
+	// when shuffle sharding is in use.
+	timeBeforeShuffleShardingLookbackPeriod := time.Now().Add(-2 * time.Hour)
+
+	// Add all partitions.
+	for partitionID := int32(0); partitionID < cfg.ingestStoragePartitions; partitionID++ {
+		desc.AddPartition(partitionID, ring.PartitionActive, timeBeforeShuffleShardingLookbackPeriod)
+	}
+
+	// Add all ingesters are partition owners.
+	for _, ingester := range ingesters {
+		desc.AddOrUpdateOwner(ingester.instanceID(), ring.OwnerActive, ingester.partitionID(), timeBeforeShuffleShardingLookbackPeriod)
+	}
+
+	return desc
+}
+
+func prepareDefaultLimits() *validation.Limits {
+	limits := &validation.Limits{}
+	flagext.DefaultValues(limits)
+	return limits
+}
+
+func prepare(t testing.TB, cfg prepConfig) ([]*Distributor, []*mockIngester, []*prometheus.Registry, *kfake.Cluster) {
+	ctx := context.Background()
+
+	// Apply default config.
+	if cfg.replicationFactor == 0 {
+		cfg.replicationFactor = 3
+	}
+	if cfg.ingestStorageEnabled && cfg.ingestStoragePartitions == 0 {
+		cfg.ingestStoragePartitions = int32(cfg.maxIngestersPerZone())
+	}
+
+	cfg.validate(t)
+
+	logger := log.NewNopLogger()
+
+	// Init a fake Kafka cluster if ingest storage is enabled.
+	if cfg.ingestStorageEnabled && cfg.ingestStorageKafka == nil {
+		cfg.ingestStorageKafka, _ = testkafka.CreateCluster(t, cfg.ingestStoragePartitions, kafkaTopic)
+	}
+
+	// Create the mocked ingesters.
+	ingesters := prepareIngesters(t, cfg)
+
+	kvStore, closer := consul.NewInMemoryClient(ring.GetCodec(), logger, nil)
 	t.Cleanup(func() { assert.NoError(t, closer.Close()) })
 
-	err := kvStore.CAS(context.Background(), ingester.IngesterRingKey,
+	// Add ingesters to the ring.
+	err := kvStore.CAS(ctx, ingester.IngesterRingKey,
 		func(_ interface{}) (interface{}, bool, error) {
-			return &ring.Desc{
-				Ingesters: ingesterDescs,
-			}, true, nil
+			return prepareRingInstances(cfg, ingesters), true, nil
 		},
 	)
 	require.NoError(t, err)
 
-	// Use a default replication factor of 3 if there isn't a provided replication factor.
-	rf := cfg.replicationFactor
-	if rf == 0 {
-		rf = 3
-	}
-
+	ingestersHeartbeatTimeout := 60 * time.Minute
 	ingestersRing, err := ring.New(ring.Config{
 		KVStore: kv.Config{
 			Mock: kvStore,
 		},
-		HeartbeatTimeout:     60 * time.Minute,
-		ReplicationFactor:    rf,
-		ZoneAwarenessEnabled: len(cfg.ingesterZones) > 0,
-	}, ingester.IngesterRingKey, ingester.IngesterRingKey, log.NewNopLogger(), nil)
+		HeartbeatTimeout:     ingestersHeartbeatTimeout,
+		ReplicationFactor:    cfg.replicationFactor,
+		ZoneAwarenessEnabled: cfg.totalZones() > 1,
+	}, ingester.IngesterRingKey, ingester.IngesterRingKey, logger, nil)
 	require.NoError(t, err)
-	require.NoError(t, services.StartAndAwaitRunning(context.Background(), ingestersRing))
+	require.NoError(t, services.StartAndAwaitRunning(ctx, ingestersRing))
 
-	test.Poll(t, time.Second, cfg.numIngesters, func() interface{} {
+	// The ring client doesn't stop quickly, so we don't wait.
+	t.Cleanup(ingestersRing.StopAsync)
+
+	test.Poll(t, time.Second, cfg.totalIngesters(), func() interface{} {
 		return ingestersRing.InstancesCount()
 	})
 
+	// Mock the ingester clients pool in order to return our mocked ingester instance instead of a
+	// real gRPC client.
 	factory := ring_client.PoolInstFunc(func(inst ring.InstanceDesc) (ring_client.PoolClient, error) {
-		return ingestersByAddr[inst.Addr], nil
+		for _, ing := range ingesters {
+			if ing.address() == inst.Addr {
+				return ing, nil
+			}
+		}
+		return nil, fmt.Errorf("ingester with address %s not found", inst.Addr)
 	})
 
+	// Initialize the ingest storage's partitions ring.
+	var partitionsRing *ring.PartitionInstanceRing
+	if cfg.ingestStorageEnabled {
+		// Init the partitions ring.
+		partitionsStore := kvStore.WithCodec(ring.GetPartitionRingCodec())
+		require.NoError(t, partitionsStore.CAS(ctx, ingester.PartitionRingKey, func(_ interface{}) (interface{}, bool, error) {
+			return preparePartitionsRing(cfg, ingesters), true, nil
+		}))
+
+		// Init the watcher.
+		watcher := ring.NewPartitionRingWatcher(ingester.PartitionRingName, ingester.PartitionRingKey, partitionsStore, logger, prometheus.NewPedanticRegistry())
+		require.NoError(t, services.StartAndAwaitRunning(ctx, watcher))
+		t.Cleanup(func() {
+			require.NoError(t, services.StopAndAwaitTerminated(ctx, watcher))
+		})
+
+		partitionsRing = ring.NewPartitionInstanceRing(watcher, ingestersRing, ingestersHeartbeatTimeout)
+	}
+
 	if cfg.limits == nil {
-		cfg.limits = &validation.Limits{}
-		flagext.DefaultValues(cfg.limits)
+		cfg.limits = prepareDefaultLimits()
 	}
 	cfg.limits.IngestionTenantShardSize = cfg.shuffleShardSize
 
+	// Create distributors.
 	distributors := make([]*Distributor, 0, cfg.numDistributors)
-	registries := make([]*prometheus.Registry, 0, cfg.numDistributors)
+	distributorRegistries := make([]*prometheus.Registry, 0, cfg.numDistributors)
 	for i := 0; i < cfg.numDistributors; i++ {
+		var (
+			distributorCfg Config
+			clientConfig   client.Config
+			ingestCfg      ingest.Config
+		)
+		flagext.DefaultValues(&distributorCfg, &clientConfig, &ingestCfg)
 
-		var distributorCfg Config
-		var clientConfig client.Config
-		flagext.DefaultValues(&distributorCfg, &clientConfig)
+		ingestCfg.Enabled = cfg.ingestStorageEnabled
+		if cfg.ingestStorageEnabled {
+			ingestCfg.KafkaConfig.Topic = kafkaTopic
+			ingestCfg.KafkaConfig.Address = cfg.ingestStorageKafka.ListenAddrs()[0]
+			ingestCfg.KafkaConfig.LastProducedOffsetPollInterval = 100 * time.Millisecond
+		}
 
 		distributorCfg.IngesterClientFactory = factory
 		distributorCfg.DistributorRing.Common.HeartbeatPeriod = 100 * time.Millisecond
@@ -3378,6 +5178,7 @@ func prepare(t *testing.T, cfg prepConfig) ([]*Distributor, []mockIngester, []*p
 		distributorCfg.DistributorRing.Common.InstanceAddr = "127.0.0.1"
 		distributorCfg.ShuffleShardingLookbackPeriod = time.Hour
 		distributorCfg.StreamingChunksPerIngesterSeriesBufferSize = 128
+		distributorCfg.IngestStorageConfig = ingestCfg
 
 		if cfg.configure != nil {
 			cfg.configure(&distributorCfg)
@@ -3385,7 +5186,7 @@ func prepare(t *testing.T, cfg prepConfig) ([]*Distributor, []mockIngester, []*p
 
 		if cfg.enableTracker {
 			codec := GetReplicaDescCodec()
-			ringStore, closer := consul.NewInMemoryClient(codec, log.NewNopLogger(), nil)
+			ringStore, closer := consul.NewInMemoryClient(codec, logger, nil)
 			t.Cleanup(func() { assert.NoError(t, closer.Close()) })
 			mock := kv.PrefixClient(ringStore, "prefix")
 			distributorCfg.HATrackerConfig = HATrackerConfig{
@@ -3403,13 +5204,15 @@ func prepare(t *testing.T, cfg prepConfig) ([]*Distributor, []mockIngester, []*p
 		require.NoError(t, err)
 
 		reg := prometheus.NewPedanticRegistry()
-		d, err := New(distributorCfg, clientConfig, overrides, nil, ingestersRing, true, reg, log.NewNopLogger())
+		d, err := New(distributorCfg, clientConfig, overrides, nil, ingestersRing, partitionsRing, true, reg, log.NewNopLogger())
 		require.NoError(t, err)
-
-		require.NoError(t, services.StartAndAwaitRunning(context.Background(), d))
+		require.NoError(t, services.StartAndAwaitRunning(ctx, d))
+		t.Cleanup(func() {
+			require.NoError(t, services.StopAndAwaitTerminated(context.Background(), d))
+		})
 
 		distributors = append(distributors, d)
-		registries = append(registries, reg)
+		distributorRegistries = append(distributorRegistries, reg)
 	}
 
 	// If the distributors ring is setup, wait until the first distributor
@@ -3420,45 +5223,57 @@ func prepare(t *testing.T, cfg prepConfig) ([]*Distributor, []mockIngester, []*p
 		})
 	}
 
-	t.Cleanup(func() { stopAll(distributors, ingestersRing) })
-
-	return distributors, ingesters, registries
-}
-
-func stopAll(ds []*Distributor, r *ring.Ring) {
-	for _, d := range ds {
-		services.StopAndAwaitTerminated(context.Background(), d) //nolint:errcheck
+	if len(cfg.ingesterDataByZone) != 0 {
+		populateIngestersData(t, ingesters, cfg.ingesterDataByZone, cfg.ingesterDataTenantID)
 	}
 
-	// Mock consul doesn't stop quickly, so don't wait.
-	r.StopAsync()
+	return distributors, ingesters, distributorRegistries, cfg.ingestStorageKafka
+}
+
+func populateIngestersData(t testing.TB, ingesters []*mockIngester, dataPerZone map[string][]*mimirpb.WriteRequest, tenantID string) {
+	ctx := user.InjectOrgID(context.Background(), tenantID)
+
+	findIngester := func(zone string, id int) *mockIngester {
+		for _, ing := range ingesters {
+			if ing.zone == zone && ing.id == id {
+				return ing
+			}
+		}
+		panic("pushing to non-existent ingester; prepConfig.validate() should have caught this")
+	}
+
+	for zone, requests := range dataPerZone {
+		for ingesterID, request := range requests {
+			if request == nil {
+				continue
+			}
+			ing := findIngester(zone, ingesterID)
+			_, err := ing.Push(ctx, request)
+			require.NoErrorf(t, err, "pushing to ingester %s", ing.address())
+		}
+	}
 }
 
 func makeWriteRequest(startTimestampMs int64, samples, metadata int, exemplars, histograms bool, metrics ...string) *mimirpb.WriteRequest {
 	request := &mimirpb.WriteRequest{}
-
-	if len(metrics) == 0 {
-		metrics = []string{"foo"}
-	}
-
 	for _, metric := range metrics {
 		for i := 0; i < samples; i++ {
-			req := makeWriteRequestTimeseries(
-				[]mimirpb.LabelAdapter{
-					{Name: model.MetricNameLabel, Value: metric},
-					{Name: "bar", Value: "baz"},
-					{Name: "sample", Value: fmt.Sprintf("%d", i)},
+			req := makeTimeseries(
+				[]string{
+					model.MetricNameLabel, metric,
+					"bar", "baz",
+					"sample", fmt.Sprintf("%d", i),
 				},
-				startTimestampMs+int64(i),
-				float64(i),
+				makeSamples(startTimestampMs+int64(i), float64(i)),
+				nil,
 			)
 
 			if exemplars {
-				req.Exemplars = makeWriteRequestExamplars(
-					[]mimirpb.LabelAdapter{
-						{Name: "traceID", Value: "123456"},
-						{Name: "foo", Value: "bar"},
-						{Name: "exemplar", Value: fmt.Sprintf("%d", i)},
+				req.Exemplars = makeExemplars(
+					[]string{
+						"traceID", "123456",
+						"foo", "bar",
+						"exemplar", fmt.Sprintf("%d", i),
 					},
 					startTimestampMs+int64(i),
 					float64(i),
@@ -3467,9 +5282,9 @@ func makeWriteRequest(startTimestampMs int64, samples, metadata int, exemplars, 
 
 			if histograms {
 				if i%2 == 0 {
-					req.Histograms = makeWriteRequestHistograms(startTimestampMs+int64(i), generateTestHistogram(i))
+					req.Histograms = makeHistograms(startTimestampMs+int64(i), generateTestHistogram(i))
 				} else {
-					req.Histograms = makeWriteRequestFloatHistograms(startTimestampMs+int64(i), generateTestFloatHistogram(i))
+					req.Histograms = makeFloatHistograms(startTimestampMs+int64(i), generateTestFloatHistogram(i))
 				}
 			}
 
@@ -3489,33 +5304,40 @@ func makeWriteRequest(startTimestampMs int64, samples, metadata int, exemplars, 
 	return request
 }
 
-func makeWriteRequestTimeseries(labels []mimirpb.LabelAdapter, ts int64, value float64) mimirpb.PreallocTimeseries {
+func makeWriteRequestWith(series ...mimirpb.PreallocTimeseries) *mimirpb.WriteRequest {
+	return &mimirpb.WriteRequest{Timeseries: series}
+}
+
+func makeTimeseries(seriesLabels []string, samples []mimirpb.Sample, exemplars []mimirpb.Exemplar) mimirpb.PreallocTimeseries {
 	return mimirpb.PreallocTimeseries{
 		TimeSeries: &mimirpb.TimeSeries{
-			Labels: labels,
-			Samples: []mimirpb.Sample{
-				{
-					Value:       value,
-					TimestampMs: ts,
-				},
-			},
+			Labels:    mimirpb.FromLabelsToLabelAdapters(labels.FromStrings(seriesLabels...)),
+			Samples:   samples,
+			Exemplars: exemplars,
 		},
 	}
 }
 
-func makeWriteRequestExamplars(labels []mimirpb.LabelAdapter, ts int64, value float64) []mimirpb.Exemplar {
-	return []mimirpb.Exemplar{{
-		Labels:      labels,
+func makeSamples(ts int64, value float64) []mimirpb.Sample {
+	return []mimirpb.Sample{{
 		Value:       value,
 		TimestampMs: ts,
 	}}
 }
 
-func makeWriteRequestHistograms(ts int64, histogram *histogram.Histogram) []mimirpb.Histogram {
+func makeExemplars(exemplarLabels []string, ts int64, value float64) []mimirpb.Exemplar {
+	return []mimirpb.Exemplar{{
+		Labels:      mimirpb.FromLabelsToLabelAdapters(labels.FromStrings(exemplarLabels...)),
+		Value:       value,
+		TimestampMs: ts,
+	}}
+}
+
+func makeHistograms(ts int64, histogram *histogram.Histogram) []mimirpb.Histogram {
 	return []mimirpb.Histogram{mimirpb.FromHistogramToHistogramProto(ts, histogram)}
 }
 
-func makeWriteRequestFloatHistograms(ts int64, histogram *histogram.FloatHistogram) []mimirpb.Histogram {
+func makeFloatHistograms(ts int64, histogram *histogram.FloatHistogram) []mimirpb.Histogram {
 	return []mimirpb.Histogram{mimirpb.FromFloatHistogramToHistogramProto(ts, histogram)}
 }
 
@@ -3566,6 +5388,31 @@ func labelSetGenForStringPairs(tb testing.TB, namesValues ...string) func(id int
 	}
 }
 
+// labelSetGenWithEmptyLabels takes a slice of label names, it then returns a label set generator which generates
+// labelsets of the given label names with empty values, plus a metric name and unique id label which are non-empty.
+func labelSetGenWithEmptyLabels(metric string, names ...string) func(id int) []mimirpb.LabelAdapter {
+	return func(id int) []mimirpb.LabelAdapter {
+		labels := make([]mimirpb.LabelAdapter, 0, len(names)+2)
+		labels = append(labels, mimirpb.LabelAdapter{
+			Name:  model.MetricNameLabel,
+			Value: metric,
+		})
+
+		labels = append(labels, mimirpb.LabelAdapter{
+			Name:  "id",
+			Value: fmt.Sprintf("%d", id),
+		})
+
+		for _, name := range names {
+			labels = append(labels, mimirpb.LabelAdapter{
+				Name:  name,
+				Value: "",
+			})
+		}
+		return labels
+	}
+}
+
 type labelSetGen func(int) []mimirpb.LabelAdapter
 type metaDataGen func(int, string) *mimirpb.MetricMetadata
 
@@ -3603,9 +5450,9 @@ func makeWriteRequestForGenerators(series int, lsg labelSetGen, elsg labelSetGen
 			}}
 		}
 		if i%2 == 0 {
-			ts.Histograms = makeWriteRequestHistograms(int64(100+i), generateTestHistogram(i))
+			ts.Histograms = makeHistograms(int64(100+i), generateTestHistogram(i))
 		} else {
-			ts.Histograms = makeWriteRequestFloatHistograms(int64(100+i), generateTestFloatHistogram(i))
+			ts.Histograms = makeFloatHistograms(int64(100+i), generateTestFloatHistogram(i))
 		}
 		request.Timeseries = append(request.Timeseries, ts)
 
@@ -3623,27 +5470,15 @@ func makeWriteRequestForGenerators(series int, lsg labelSetGen, elsg labelSetGen
 }
 
 func makeWriteRequestExemplar(seriesLabels []string, timestamp int64, exemplarLabels []string) *mimirpb.WriteRequest {
-	return &mimirpb.WriteRequest{
-		Timeseries: []mimirpb.PreallocTimeseries{
-			makeExemplarTimeseries(seriesLabels, timestamp, exemplarLabels),
-		},
-	}
+	return makeWriteRequestWith(makeExemplarTimeseries(seriesLabels, timestamp, exemplarLabels))
 }
 
 func makeWriteRequestHistogram(seriesLabels []string, timestamp int64, histogram *histogram.Histogram) *mimirpb.WriteRequest {
-	return &mimirpb.WriteRequest{
-		Timeseries: []mimirpb.PreallocTimeseries{
-			makeHistogramTimeseries(seriesLabels, timestamp, histogram),
-		},
-	}
+	return makeWriteRequestWith(makeHistogramTimeseries(seriesLabels, timestamp, histogram))
 }
 
 func makeWriteRequestFloatHistogram(seriesLabels []string, timestamp int64, histogram *histogram.FloatHistogram) *mimirpb.WriteRequest {
-	return &mimirpb.WriteRequest{
-		Timeseries: []mimirpb.PreallocTimeseries{
-			makeFloatHistogramTimeseries(seriesLabels, timestamp, histogram),
-		},
-	}
+	return makeWriteRequestWith(makeFloatHistogramTimeseries(seriesLabels, timestamp, histogram))
 }
 
 func makeExemplarTimeseries(seriesLabels []string, timestamp int64, exemplarLabels []string) mimirpb.PreallocTimeseries {
@@ -3664,7 +5499,7 @@ func makeHistogramTimeseries(seriesLabels []string, timestamp int64, histogram *
 	return mimirpb.PreallocTimeseries{
 		TimeSeries: &mimirpb.TimeSeries{
 			Labels:     mimirpb.FromLabelsToLabelAdapters(labels.FromStrings(seriesLabels...)),
-			Histograms: makeWriteRequestHistograms(timestamp, histogram),
+			Histograms: makeHistograms(timestamp, histogram),
 		},
 	}
 }
@@ -3673,37 +5508,39 @@ func makeFloatHistogramTimeseries(seriesLabels []string, timestamp int64, histog
 	return mimirpb.PreallocTimeseries{
 		TimeSeries: &mimirpb.TimeSeries{
 			Labels:     mimirpb.FromLabelsToLabelAdapters(labels.FromStrings(seriesLabels...)),
-			Histograms: makeWriteRequestFloatHistograms(timestamp, histogram),
+			Histograms: makeFloatHistograms(timestamp, histogram),
 		},
 	}
 }
 
-func expectedResponse(start, end int, histograms bool) model.Matrix {
+func expectedResponse(start, end int, histograms bool, metrics ...string) model.Matrix {
 	// TODO(histograms): should we modify the tests so it doesn't return both float and histogram for the same timestamp? (but still test sending float alone, histogram alone, and mixed) but might not be worth fixing the mock ingester
 	result := model.Matrix{}
-	for i := start; i < end; i++ {
-		ss := &model.SampleStream{
-			Metric: model.Metric{
-				model.MetricNameLabel: "foo",
-				"bar":                 "baz",
-				"sample":              model.LabelValue(fmt.Sprintf("%d", i)),
-			},
-			Values: []model.SamplePair{
-				{
-					Value:     model.SampleValue(i),
-					Timestamp: model.Time(i),
+	for _, metricName := range metrics {
+		for i := start; i < end; i++ {
+			ss := &model.SampleStream{
+				Metric: model.Metric{
+					model.MetricNameLabel: model.LabelValue(metricName),
+					"bar":                 "baz",
+					"sample":              model.LabelValue(fmt.Sprintf("%d", i)),
 				},
-			},
-		}
-		if histograms {
-			ss.Histograms = []model.SampleHistogramPair{
-				{
-					Histogram: util_test.GenerateTestSampleHistogram(i),
-					Timestamp: model.Time(i),
+				Values: []model.SamplePair{
+					{
+						Value:     model.SampleValue(i),
+						Timestamp: model.Time(i),
+					},
 				},
 			}
+			if histograms {
+				ss.Histograms = []model.SampleHistogramPair{
+					{
+						Histogram: util_test.GenerateTestSampleHistogram(i),
+						Timestamp: model.Time(i),
+					},
+				}
+			}
+			result = append(result, ss)
 		}
-		result = append(result, ss)
 	}
 	return result
 }
@@ -3727,11 +5564,35 @@ type mockIngester struct {
 	queryDelay                    time.Duration
 	pushDelay                     time.Duration
 	calls                         map[string]int
-	seriesCountTotal              uint64
 	zone                          string
 	labelNamesStreamResponseDelay time.Duration
 	timeOut                       bool
 	tokens                        []uint32
+	id                            int
+	circuitBreakerOpen            bool
+	disableStreamingResponse      bool
+
+	// partitionReader is responsible to consume a partition from Kafka when the
+	// ingest storage is enabled. This field is nil if the ingest storage is disabled.
+	partitionReader *ingest.PartitionReader
+}
+
+func (i *mockIngester) instanceID() string {
+	return fmt.Sprintf("ingester-%s-%d", i.zone, i.id)
+}
+
+// partitionID returns the partition ID owned by this ingester when ingest storage is used.
+func (i *mockIngester) partitionID() int32 {
+	id, err := ingest.IngesterPartitionID(i.instanceID())
+	if err != nil {
+		panic(err)
+	}
+
+	return id
+}
+
+func (i *mockIngester) address() string {
+	return i.instanceID()
 }
 
 func (i *mockIngester) series() map[uint32]*mimirpb.PreallocTimeseries {
@@ -3746,9 +5607,6 @@ func (i *mockIngester) series() map[uint32]*mimirpb.PreallocTimeseries {
 }
 
 func (i *mockIngester) Check(context.Context, *grpc_health_v1.HealthCheckRequest, ...grpc.CallOption) (*grpc_health_v1.HealthCheckResponse, error) {
-	i.Lock()
-	defer i.Unlock()
-
 	i.trackCall("Check")
 
 	return &grpc_health_v1.HealthCheckResponse{}, nil
@@ -3759,12 +5617,12 @@ func (i *mockIngester) Close() error {
 }
 
 func (i *mockIngester) Push(ctx context.Context, req *mimirpb.WriteRequest, _ ...grpc.CallOption) (*mimirpb.WriteResponse, error) {
+	i.trackCall("Push")
+
 	time.Sleep(i.pushDelay)
 
 	i.Lock()
 	defer i.Unlock()
-
-	i.trackCall("Push")
 
 	if !i.happy {
 		return nil, errFail
@@ -3772,6 +5630,10 @@ func (i *mockIngester) Push(ctx context.Context, req *mimirpb.WriteRequest, _ ..
 
 	if i.timeOut {
 		return nil, context.DeadlineExceeded
+	}
+
+	if i.circuitBreakerOpen {
+		return nil, client.ErrCircuitBreakerOpen{}
 	}
 
 	if len(req.Timeseries) > 0 && i.timeseries == nil {
@@ -3787,30 +5649,28 @@ func (i *mockIngester) Push(ctx context.Context, req *mimirpb.WriteRequest, _ ..
 		return nil, err
 	}
 
-	for _, series := range req.Timeseries {
-		hash := shardByAllLabels(orgid, series.Labels)
+	for _, unsafeSeries := range req.Timeseries {
+		// Make a copy because the request Timeseries are reused. It's important to make a copy
+		// even if the timeseries already exists in our local map, because we may still retain
+		// some request's memory when merging exemplars.
+		series, err := clonePreallocTimeseries(unsafeSeries)
+		if err != nil {
+			return nil, err
+		}
+
+		hash := mimirpb.ShardByAllLabelAdapters(orgid, series.Labels)
 		existing, ok := i.timeseries[hash]
 		if !ok {
-			// Make a copy because the request Timeseries are reused
-			item := mimirpb.TimeSeries{
-				Labels:     make([]mimirpb.LabelAdapter, len(series.TimeSeries.Labels)),
-				Samples:    make([]mimirpb.Sample, len(series.TimeSeries.Samples)),
-				Histograms: make([]mimirpb.Histogram, len(series.TimeSeries.Histograms)),
-			}
-
-			copy(item.Labels, series.TimeSeries.Labels)
-			copy(item.Samples, series.TimeSeries.Samples)
-			copy(item.Histograms, series.TimeSeries.Histograms)
-
-			i.timeseries[hash] = &mimirpb.PreallocTimeseries{TimeSeries: &item}
+			i.timeseries[hash] = &series
 		} else {
 			existing.Samples = append(existing.Samples, series.Samples...)
 			existing.Histograms = append(existing.Histograms, series.Histograms...)
+			existing.Exemplars = append(existing.Exemplars, series.Exemplars...)
 		}
 	}
 
 	for _, m := range req.Metadata {
-		hash := shardByMetricName(orgid, m.MetricFamilyName)
+		hash := mimirpb.ShardByMetricName(orgid, m.MetricFamilyName)
 		set, ok := i.metadata[hash]
 		if !ok {
 			set = map[mimirpb.MetricMetadata]struct{}{}
@@ -3834,13 +5694,19 @@ func makeWireChunk(c chunk.EncodedChunk) client.Chunk {
 	return chunk
 }
 
-func (i *mockIngester) QueryStream(_ context.Context, req *client.QueryRequest, _ ...grpc.CallOption) (client.Ingester_QueryStreamClient, error) {
-	time.Sleep(i.queryDelay)
+func (i *mockIngester) QueryStream(ctx context.Context, req *client.QueryRequest, _ ...grpc.CallOption) (client.Ingester_QueryStreamClient, error) {
+	i.trackCall("QueryStream")
+
+	if err := i.enforceReadConsistency(ctx); err != nil {
+		return nil, err
+	}
+
+	if err := i.enforceQueryDelay(ctx); err != nil {
+		return nil, err
+	}
 
 	i.Lock()
 	defer i.Unlock()
-
-	i.trackCall("QueryStream")
 
 	if !i.happy {
 		return nil, errFail
@@ -3934,18 +5800,25 @@ func (i *mockIngester) QueryStream(_ context.Context, req *client.QueryRequest, 
 		}
 		if hexists {
 			for _, c := range hchunks {
-				// panic("got hist")
 				wireChunks = append(wireChunks, makeWireChunk(c))
 			}
 		}
 		if fhexists {
 			for _, c := range fhchunks {
-				// panic("got fhist")
 				wireChunks = append(wireChunks, makeWireChunk(c))
 			}
 		}
 
-		if req.StreamingChunksBatchSize > 0 {
+		if i.disableStreamingResponse || req.StreamingChunksBatchSize == 0 {
+			nonStreamingResponses = append(nonStreamingResponses, &client.QueryStreamResponse{
+				Chunkseries: []client.TimeSeriesChunk{
+					{
+						Labels: ts.Labels,
+						Chunks: wireChunks,
+					},
+				},
+			})
+		} else {
 			streamingLabelResponses = append(streamingLabelResponses, &client.QueryStreamResponse{
 				StreamingSeries: []client.QueryStreamSeries{
 					{
@@ -3963,40 +5836,108 @@ func (i *mockIngester) QueryStream(_ context.Context, req *client.QueryRequest, 
 					},
 				},
 			})
-		} else {
-			nonStreamingResponses = append(nonStreamingResponses, &client.QueryStreamResponse{
-				Chunkseries: []client.TimeSeriesChunk{
-					{
-						Labels: ts.Labels,
-						Chunks: wireChunks,
-					},
-				},
-			})
 		}
 	}
 
 	var results []*client.QueryStreamResponse
 
-	if req.StreamingChunksBatchSize > 0 {
+	if i.disableStreamingResponse {
+		results = nonStreamingResponses
+	} else {
 		endOfLabelsMessage := &client.QueryStreamResponse{
 			IsEndOfSeriesStream: true,
 		}
 		results = append(streamingLabelResponses, endOfLabelsMessage)
 		results = append(results, streamingChunkResponses...)
-	} else {
-		results = nonStreamingResponses
 	}
 
 	return &stream{
+		ctx:     ctx,
 		results: results,
 	}, nil
 }
 
-func (i *mockIngester) MetricsForLabelMatchers(_ context.Context, req *client.MetricsForLabelMatchersRequest, _ ...grpc.CallOption) (*client.MetricsForLabelMatchersResponse, error) {
+func (i *mockIngester) QueryExemplars(ctx context.Context, req *client.ExemplarQueryRequest, _ ...grpc.CallOption) (*client.ExemplarQueryResponse, error) {
+	i.trackCall("QueryExemplars")
+
+	if err := i.enforceReadConsistency(ctx); err != nil {
+		return nil, err
+	}
+
 	i.Lock()
 	defer i.Unlock()
 
+	if !i.happy {
+		return nil, errFail
+	}
+
+	from, through, multiMatchers, err := client.FromExemplarQueryRequest(req)
+	if err != nil {
+		return nil, err
+	}
+
+	res := &client.ExemplarQueryResponse{}
+
+	for _, series := range i.timeseries {
+		seriesMatches := false
+		seriesLabels := mimirpb.FromLabelAdaptersToLabels(series.Labels)
+
+		// Check if the series matches any of the matchers in the request.
+		for _, matchers := range multiMatchers {
+			matcherMatches := true
+
+			for _, matcher := range matchers {
+				if !matcher.Matches(seriesLabels.Get(matcher.Name)) {
+					matcherMatches = false
+					break
+				}
+			}
+
+			if matcherMatches {
+				seriesMatches = true
+				break
+			}
+		}
+
+		if !seriesMatches {
+			continue
+		}
+
+		// Filter exemplars by time range.
+		var exemplars []mimirpb.Exemplar
+		for _, exemplar := range series.Exemplars {
+			if exemplar.TimestampMs >= from && exemplar.TimestampMs <= through {
+				exemplars = append(exemplars, exemplar)
+			}
+		}
+
+		if len(exemplars) > 0 {
+			res.Timeseries = append(res.Timeseries, mimirpb.TimeSeries{
+				Labels:    series.Labels,
+				Exemplars: exemplars,
+			})
+		}
+	}
+
+	// Sort series by labels because the real ingester returns sorted ones.
+	slices.SortFunc(res.Timeseries, func(a, b mimirpb.TimeSeries) int {
+		aKey := client.LabelsToKeyString(mimirpb.FromLabelAdaptersToLabels(a.Labels))
+		bKey := client.LabelsToKeyString(mimirpb.FromLabelAdaptersToLabels(b.Labels))
+		return strings.Compare(aKey, bKey)
+	})
+
+	return res, nil
+}
+
+func (i *mockIngester) MetricsForLabelMatchers(ctx context.Context, req *client.MetricsForLabelMatchersRequest, _ ...grpc.CallOption) (*client.MetricsForLabelMatchersResponse, error) {
 	i.trackCall("MetricsForLabelMatchers")
+
+	if err := i.enforceReadConsistency(ctx); err != nil {
+		return nil, err
+	}
+
+	i.Lock()
+	defer i.Unlock()
 
 	if !i.happy {
 		return nil, errFail
@@ -4018,11 +5959,15 @@ func (i *mockIngester) MetricsForLabelMatchers(_ context.Context, req *client.Me
 	return &response, nil
 }
 
-func (i *mockIngester) LabelValues(_ context.Context, req *client.LabelValuesRequest, _ ...grpc.CallOption) (*client.LabelValuesResponse, error) {
+func (i *mockIngester) LabelValues(ctx context.Context, req *client.LabelValuesRequest, _ ...grpc.CallOption) (*client.LabelValuesResponse, error) {
+	i.trackCall("LabelValues")
+
+	if err := i.enforceReadConsistency(ctx); err != nil {
+		return nil, err
+	}
+
 	i.Lock()
 	defer i.Unlock()
-
-	i.trackCall("LabelValues")
 
 	if !i.happy {
 		return nil, errFail
@@ -4065,11 +6010,15 @@ func (i *mockIngester) LabelValues(_ context.Context, req *client.LabelValuesReq
 	return &client.LabelValuesResponse{LabelValues: response}, nil
 }
 
-func (i *mockIngester) LabelNames(_ context.Context, req *client.LabelNamesRequest, _ ...grpc.CallOption) (*client.LabelNamesResponse, error) {
+func (i *mockIngester) LabelNames(ctx context.Context, req *client.LabelNamesRequest, _ ...grpc.CallOption) (*client.LabelNamesResponse, error) {
+	i.trackCall("LabelNames")
+
+	if err := i.enforceReadConsistency(ctx); err != nil {
+		return nil, err
+	}
+
 	i.Lock()
 	defer i.Unlock()
-
-	i.trackCall("LabelNames")
 
 	if !i.happy {
 		return nil, errFail
@@ -4093,11 +6042,15 @@ func (i *mockIngester) LabelNames(_ context.Context, req *client.LabelNamesReque
 	return &response, nil
 }
 
-func (i *mockIngester) MetricsMetadata(context.Context, *client.MetricsMetadataRequest, ...grpc.CallOption) (*client.MetricsMetadataResponse, error) {
+func (i *mockIngester) MetricsMetadata(ctx context.Context, _ *client.MetricsMetadataRequest, _ ...grpc.CallOption) (*client.MetricsMetadataResponse, error) {
+	i.trackCall("MetricsMetadata")
+
+	if err := i.enforceReadConsistency(ctx); err != nil {
+		return nil, err
+	}
+
 	i.Lock()
 	defer i.Unlock()
-
-	i.trackCall("MetricsMetadata")
 
 	if !i.happy {
 		return nil, errFail
@@ -4113,7 +6066,11 @@ func (i *mockIngester) MetricsMetadata(context.Context, *client.MetricsMetadataR
 	return resp, nil
 }
 
-func (i *mockIngester) LabelNamesAndValues(_ context.Context, _ *client.LabelNamesAndValuesRequest, _ ...grpc.CallOption) (client.Ingester_LabelNamesAndValuesClient, error) {
+func (i *mockIngester) LabelNamesAndValues(ctx context.Context, _ *client.LabelNamesAndValuesRequest, _ ...grpc.CallOption) (client.Ingester_LabelNamesAndValuesClient, error) {
+	if err := i.enforceReadConsistency(ctx); err != nil {
+		return nil, err
+	}
+
 	i.Lock()
 	defer i.Unlock()
 	results := map[string]map[string]struct{}{}
@@ -4160,11 +6117,15 @@ func (s *labelNamesAndValuesMockStream) Recv() (*client.LabelNamesAndValuesRespo
 	return result, nil
 }
 
-func (i *mockIngester) LabelValuesCardinality(_ context.Context, req *client.LabelValuesCardinalityRequest, _ ...grpc.CallOption) (client.Ingester_LabelValuesCardinalityClient, error) {
+func (i *mockIngester) LabelValuesCardinality(ctx context.Context, req *client.LabelValuesCardinalityRequest, _ ...grpc.CallOption) (client.Ingester_LabelValuesCardinalityClient, error) {
+	i.trackCall("LabelValuesCardinality")
+
+	if err := i.enforceReadConsistency(ctx); err != nil {
+		return nil, err
+	}
+
 	i.Lock()
 	defer i.Unlock()
-
-	i.trackCall("LabelValuesCardinality")
 
 	if !i.happy {
 		return nil, errFail
@@ -4230,11 +6191,15 @@ func (s *labelValuesCardinalityStream) Recv() (*client.LabelValuesCardinalityRes
 	return result, nil
 }
 
-func (i *mockIngester) ActiveSeries(_ context.Context, req *client.ActiveSeriesRequest, _ ...grpc.CallOption) (client.Ingester_ActiveSeriesClient, error) {
+func (i *mockIngester) ActiveSeries(ctx context.Context, req *client.ActiveSeriesRequest, _ ...grpc.CallOption) (client.Ingester_ActiveSeriesClient, error) {
+	i.trackCall("ActiveSeries")
+
+	if err := i.enforceReadConsistency(ctx); err != nil {
+		return nil, err
+	}
+
 	i.Lock()
 	defer i.Unlock()
-
-	i.trackCall("ActiveSeries")
 
 	if !i.happy {
 		return nil, errFail
@@ -4245,7 +6210,8 @@ func (i *mockIngester) ActiveSeries(_ context.Context, req *client.ActiveSeriesR
 		return nil, err
 	}
 
-	results := []*client.ActiveSeriesResponse{}
+	var results []*client.ActiveSeriesResponse
+
 	resp := &client.ActiveSeriesResponse{}
 
 	for _, series := range i.timeseries {
@@ -4284,6 +6250,9 @@ func (s *activeSeriesStream) CloseSend() error {
 }
 
 func (i *mockIngester) trackCall(name string) {
+	i.Lock()
+	defer i.Unlock()
+
 	if i.calls == nil {
 		i.calls = map[string]int{}
 	}
@@ -4296,6 +6265,46 @@ func (i *mockIngester) countCalls(name string) int {
 	defer i.Unlock()
 
 	return i.calls[name]
+}
+
+func (i *mockIngester) enforceReadConsistency(ctx context.Context) error {
+	// Strong read consistency is required to be enforced only if ingest storage is enabled.
+	if i.partitionReader == nil {
+		return nil
+	}
+
+	level, ok := api.ReadConsistencyFromContext(ctx)
+	if !ok || level != api.ReadConsistencyStrong {
+		return nil
+	}
+
+	return i.partitionReader.WaitReadConsistency(ctx)
+}
+
+func (i *mockIngester) enforceQueryDelay(ctx context.Context) error {
+	select {
+	case <-time.After(i.queryDelay):
+		return nil
+
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type mockIngesterPusherAdapter struct {
+	ingester *mockIngester
+}
+
+func newMockIngesterPusherAdapter(ingester *mockIngester) *mockIngesterPusherAdapter {
+	return &mockIngesterPusherAdapter{
+		ingester: ingester,
+	}
+}
+
+// PushToStorage implements ingest.Pusher.
+func (c *mockIngesterPusherAdapter) PushToStorage(ctx context.Context, req *mimirpb.WriteRequest) error {
+	_, err := c.ingester.Push(ctx, req)
+	return err
 }
 
 // noopIngester is a mocked ingester which does nothing.
@@ -4314,6 +6323,10 @@ func (i *noopIngester) Push(context.Context, *mimirpb.WriteRequest, ...grpc.Call
 
 type stream struct {
 	grpc.ClientStream
+
+	// The mocked gRPC client's context.
+	ctx context.Context
+
 	i       int
 	results []*client.QueryStreamResponse
 }
@@ -4323,6 +6336,12 @@ func (*stream) CloseSend() error {
 }
 
 func (s *stream) Recv() (*client.QueryStreamResponse, error) {
+	// Check whether the context has been canceled, so that we can test the case the context
+	// gets cancelled while reading messages from gRPC client.
+	if s.ctx.Err() != nil {
+		return nil, s.ctx.Err()
+	}
+
 	if s.i >= len(s.results) {
 		return nil, io.EOF
 	}
@@ -4332,21 +6351,30 @@ func (s *stream) Recv() (*client.QueryStreamResponse, error) {
 }
 
 func (s *stream) Context() context.Context {
-	return context.Background()
+	return s.ctx
 }
 
 func (i *mockIngester) AllUserStats(context.Context, *client.UserStatsRequest, ...grpc.CallOption) (*client.UsersStatsResponse, error) {
 	return &i.stats, nil
 }
 
-func (i *mockIngester) UserStats(context.Context, *client.UserStatsRequest, ...grpc.CallOption) (*client.UserStatsResponse, error) {
+func (i *mockIngester) UserStats(ctx context.Context, _ *client.UserStatsRequest, _ ...grpc.CallOption) (*client.UserStatsResponse, error) {
+	i.trackCall("UserStats")
+
+	if err := i.enforceReadConsistency(ctx); err != nil {
+		return nil, err
+	}
+
+	i.Lock()
+	defer i.Unlock()
+
 	if !i.happy {
 		return nil, errFail
 	}
 
 	return &client.UserStatsResponse{
 		IngestionRate:     0,
-		NumSeries:         i.seriesCountTotal,
+		NumSeries:         uint64(len(i.timeseries)),
 		ApiIngestionRate:  0,
 		RuleIngestionRate: 0,
 	}, nil
@@ -4419,7 +6447,7 @@ func TestDistributorValidation(t *testing.T) {
 				TimestampMs: int64(now),
 				Value:       2,
 			}},
-			expectedErr: status.New(codes.FailedPrecondition, fmt.Sprintf(tooManyLabelsMsgFormat, 3, 2, `testmetric{foo2="bar2", foo="bar"}`, "")),
+			expectedErr: status.New(codes.FailedPrecondition, fmt.Sprintf(tooManyLabelsMsgFormat, 3, 2, `testmetric{foo="bar", foo2="bar2"}`, "")),
 		},
 		"exceeds maximum labels per series with a metric that exceeds 200 characters when formatted": {
 			labels: [][]mimirpb.LabelAdapter{{
@@ -4456,7 +6484,7 @@ func TestDistributorValidation(t *testing.T) {
 				{TimestampMs: int64(now), Value: 2},
 				{TimestampMs: int64(past), Value: 2},
 			},
-			expectedErr: status.New(codes.FailedPrecondition, fmt.Sprintf(tooManyLabelsMsgFormat, 3, 2, `testmetric{foo2="bar2", foo="bar"}`, "")),
+			expectedErr: status.New(codes.FailedPrecondition, fmt.Sprintf(tooManyLabelsMsgFormat, 3, 2, `testmetric{foo="bar", foo2="bar2"}`, "")),
 		},
 		"metadata validation failure": {
 			metadata: []*mimirpb.MetricMetadata{{MetricFamilyName: "", Help: "a test metric.", Unit: "", Type: mimirpb.COUNTER}},
@@ -4479,7 +6507,7 @@ func TestDistributorValidation(t *testing.T) {
 				TimestampMs: int64(now),
 				Value:       1,
 			}},
-			expectedErr: status.New(codes.FailedPrecondition, fmt.Sprintf(exemplarEmptyLabelsMsgFormat, now, labels.FromStrings(labels.MetricName, "testmetric", "foo", "bar"), "{}")),
+			expectedErr: status.New(codes.FailedPrecondition, fmt.Sprintf(exemplarEmptyLabelsMsgFormat, now, `testmetric{foo="bar"}`, "{}")),
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -4490,7 +6518,7 @@ func TestDistributorValidation(t *testing.T) {
 			limits.MaxLabelNamesPerSeries = 2
 			limits.MaxGlobalExemplarsPerUser = 10
 
-			ds, _, _ := prepare(t, prepConfig{
+			ds, _, _, _ := prepare(t, prepConfig{
 				numIngesters:    3,
 				happyIngesters:  3,
 				numDistributors: 1,
@@ -4508,23 +6536,6 @@ func TestDistributorValidation(t *testing.T) {
 			}
 		})
 	}
-}
-
-// This is not great, but we deal with unsorted labels in prePushRelabelMiddleware.
-func TestShardByAllLabelsReturnsWrongResultsForUnsortedLabels(t *testing.T) {
-	val1 := shardByAllLabels("test", []mimirpb.LabelAdapter{
-		{Name: "__name__", Value: "foo"},
-		{Name: "bar", Value: "baz"},
-		{Name: "sample", Value: "1"},
-	})
-
-	val2 := shardByAllLabels("test", []mimirpb.LabelAdapter{
-		{Name: "__name__", Value: "foo"},
-		{Name: "sample", Value: "1"},
-		{Name: "bar", Value: "baz"},
-	})
-
-	assert.NotEqual(t, val1, val2)
 }
 
 func TestDistributor_Push_Relabel(t *testing.T) {
@@ -4563,7 +6574,7 @@ func TestDistributor_Push_Relabel(t *testing.T) {
 		flagext.DefaultValues(&limits)
 		limits.MetricRelabelConfigs = tc.metricRelabelConfigs
 
-		ds, ingesters, _ := prepare(t, prepConfig{
+		ds, ingesters, _, _ := prepare(t, prepConfig{
 			numIngesters:    2,
 			happyIngesters:  2,
 			numDistributors: 1,
@@ -4587,10 +6598,10 @@ func TestDistributor_Push_Relabel(t *testing.T) {
 	}
 }
 
-func countMockIngestersCalls(ingesters []mockIngester, name string) int {
+func countMockIngestersCalled(ingesters []*mockIngester, name string) int {
 	count := 0
-	for i := 0; i < len(ingesters); i++ {
-		if ingesters[i].countCalls(name) > 0 {
+	for _, i := range ingesters {
+		if i.countCalls(name) > 0 {
 			count++
 		}
 	}
@@ -4618,7 +6629,7 @@ func TestDistributor_MetricsWithRequestModifications(t *testing.T) {
 		}
 	}
 	getDistributor := func(config prepConfig) (*Distributor, *prometheus.Registry) {
-		ds, _, regs := prepare(t, config)
+		ds, _, regs, _ := prepare(t, config)
 		return ds[0], regs[0]
 	}
 	type expectedMetricsCfg struct {
@@ -4986,7 +6997,7 @@ func TestDistributor_CleanupIsDoneAfterLastIngesterReturns(t *testing.T) {
 	// But there are still resources occupied within the distributor while it's
 	// waiting for all ingesters to return. So we want the instance limits to accurately reflect that.
 
-	distributors, ingesters, _ := prepare(t, prepConfig{
+	distributors, ingesters, _, _ := prepare(t, prepConfig{
 		numIngesters:      3,
 		happyIngesters:    3,
 		numDistributors:   1,
@@ -5017,7 +7028,7 @@ func TestSeriesAreShardedToCorrectIngesters(t *testing.T) {
 		numDistributors:   1,
 		replicationFactor: 1, // push each series to single ingester only
 	}
-	d, ing, _ := prepare(t, config)
+	d, ingesters, _, _ := prepare(t, config)
 
 	uniqueMetricsGen := func(sampleIdx int) []mimirpb.LabelAdapter {
 		return []mimirpb.LabelAdapter{
@@ -5051,20 +7062,20 @@ func TestSeriesAreShardedToCorrectIngesters(t *testing.T) {
 	// Verify that each ingester only received series and metadata that it should receive.
 	totalSeries := 0
 	totalMetadata := 0
-	for ix := range ing {
-		totalSeries += len(ing[ix].timeseries)
-		totalMetadata += len(ing[ix].metadata)
+	for ix, ing := range ingesters {
+		totalSeries += len(ing.timeseries)
+		totalMetadata += len(ing.metadata)
 
-		for _, ts := range ing[ix].timeseries {
-			token := distrib.tokenForLabels(userName, ts.Labels)
-			ingIx := getIngesterIndexForToken(token, ing)
+		for _, ts := range ing.timeseries {
+			token := tokenForLabels(userName, ts.Labels)
+			ingIx := getIngesterIndexForToken(token, ingesters)
 			assert.Equal(t, ix, ingIx)
 		}
 
-		for _, metadataMap := range ing[ix].metadata {
+		for _, metadataMap := range ing.metadata {
 			for m := range metadataMap {
-				token := distrib.tokenForMetadata(userName, m.MetricFamilyName)
-				ingIx := getIngesterIndexForToken(token, ing)
+				token := tokenForMetadata(userName, m.MetricFamilyName)
+				ingIx := getIngesterIndexForToken(token, ingesters)
 				assert.Equal(t, ix, ingIx)
 			}
 		}
@@ -5072,10 +7083,10 @@ func TestSeriesAreShardedToCorrectIngesters(t *testing.T) {
 
 	// Verify that all timeseries were forwarded to ingesters.
 	for _, ts := range req.Timeseries {
-		token := distrib.tokenForLabels(userName, ts.Labels)
-		ingIx := getIngesterIndexForToken(token, ing)
+		token := tokenForLabels(userName, ts.Labels)
+		ingIx := getIngesterIndexForToken(token, ingesters)
 
-		assert.Equal(t, ts.Labels, ing[ingIx].timeseries[token].Labels)
+		assert.Equal(t, ts.Labels, ingesters[ingIx].timeseries[token].Labels)
 	}
 
 	assert.Equal(t, series, totalSeries)
@@ -5125,7 +7136,7 @@ func TestHandlePushError(t *testing.T) {
 		numDistributors:   1,
 		replicationFactor: 1, // push each series to single ingester only
 	}
-	d, _, _ := prepare(t, config)
+	d, _, _, _ := prepare(t, config)
 	ctx := context.Background()
 
 	for testName, testData := range test {
@@ -5144,13 +7155,13 @@ func TestHandlePushError(t *testing.T) {
 	}
 }
 
-func getIngesterIndexForToken(key uint32, ings []mockIngester) int {
+func getIngesterIndexForToken(key uint32, ings []*mockIngester) int {
 	tokens := []uint32{}
 	tokensMap := map[uint32]int{}
 
-	for ix := range ings {
-		tokens = append(tokens, ings[ix].tokens...)
-		for _, t := range ings[ix].tokens {
+	for ix, ing := range ings {
+		tokens = append(tokens, ing.tokens...)
+		for _, t := range ing.tokens {
 			tokensMap[t] = ix
 		}
 	}
@@ -5172,7 +7183,7 @@ func searchToken(tokens []uint32, key uint32) int {
 }
 
 func checkGRPCError(t *testing.T, expectedStatus *status.Status, expectedDetails *mimirpb.ErrorDetails, err error) {
-	stat, ok := status.FromError(err)
+	stat, ok := grpcutil.ErrorToStatus(err)
 	require.True(t, ok)
 	require.Equal(t, expectedStatus.Code(), stat.Code())
 	require.Equal(t, expectedStatus.Message(), stat.Message())
@@ -5194,11 +7205,11 @@ func createStatusWithDetails(t *testing.T, code codes.Code, message string, caus
 	return statWithDetails
 }
 
-func countCalls(ingesters []mockIngester, name string) int {
+func countCalls(ingesters []*mockIngester, name string) int {
 	count := 0
 
-	for i := range ingesters {
-		count += ingesters[i].countCalls(name)
+	for _, ing := range ingesters {
+		count += ing.countCalls(name)
 	}
 
 	return count
@@ -5345,7 +7356,7 @@ func TestStartFinishRequest(t *testing.T) {
 			flagext.DefaultValues(&limits)
 
 			// Prepare distributor and wrap the mock push function with its middlewares.
-			ds, _, _ := prepare(t, prepConfig{
+			ds, _, _, _ := prepare(t, prepConfig{
 				numDistributors: 1,
 				limits:          &limits,
 				enableTracker:   true,
@@ -5382,7 +7393,7 @@ func TestStartFinishRequest(t *testing.T) {
 					// Verify that errors returned by StartPushRequest method are NOT gRPC status errors.
 					// They will be converted to gRPC status by grpcInflightMethodLimiter.
 					require.Error(t, err)
-					_, ok := status.FromError(err)
+					_, ok := grpcutil.ErrorToStatus(err)
 					require.False(t, ok)
 				}
 			}
@@ -5423,7 +7434,7 @@ func TestSendMessageMetadata(t *testing.T) {
 		return mock, nil
 	})
 
-	d, err := New(distributorCfg, clientConfig, validation.MockDefaultOverrides(), nil, ingestersRing, false, nil, log.NewNopLogger())
+	d, err := New(distributorCfg, clientConfig, validation.MockDefaultOverrides(), nil, ingestersRing, nil, false, nil, log.NewNopLogger())
 	require.NoError(t, err)
 	require.NotNil(t, d)
 
@@ -5440,14 +7451,14 @@ func TestSendMessageMetadata(t *testing.T) {
 		Source: mimirpb.API,
 	}
 
-	err = d.send(ctx, ring.InstanceDesc{Addr: "1.2.3.4:5555", Id: "test"}, req.Timeseries, nil, req.Source)
+	err = d.sendToIngester(ctx, ring.InstanceDesc{Addr: "1.2.3.4:5555", Id: "test"}, req)
 	require.NoError(t, err)
 
-	// Verify that d.send added message size to metadata.
+	// Verify that d.sendToIngester added message size to metadata.
 	require.Equal(t, []string{strconv.Itoa(req.Size())}, mock.md[grpcutil.MetadataMessageSize])
 }
 
-func TestQueryQuorumConfig_ZoneSorting(t *testing.T) {
+func TestQueryIngestersRingZoneSorter(t *testing.T) {
 	testCases := map[string]struct {
 		instances []ring.InstanceDesc
 		verify    func(t *testing.T, sortedZones []string)
@@ -5553,10 +7564,6 @@ func TestQueryQuorumConfig_ZoneSorting(t *testing.T) {
 		},
 	}
 
-	d := &Distributor{
-		cfg: Config{},
-	}
-
 	for name, testCase := range testCases {
 		t.Run(name, func(t *testing.T) {
 			replicationSet := ring.ReplicationSet{
@@ -5564,9 +7571,70 @@ func TestQueryQuorumConfig_ZoneSorting(t *testing.T) {
 				ZoneAwarenessEnabled: true,
 			}
 
-			cfg := d.queryQuorumConfig(context.Background(), replicationSet)
-			sorted := cfg.ZoneSorter(uniqueZones(testCase.instances))
+			sorted := queryIngestersRingZoneSorter(replicationSet)(uniqueZones(testCase.instances))
+			testCase.verify(t, sorted)
+		})
+	}
+}
 
+func TestQueryIngesterPartitionsRingZoneSorter(t *testing.T) {
+	testCases := map[string]struct {
+		zones         []string
+		preferredZone string
+		verify        func(t *testing.T, sortedZones []string)
+	}{
+		"no zones": {
+			zones: []string{},
+			verify: func(t *testing.T, sortedZones []string) {
+				require.Empty(t, sortedZones)
+			},
+		},
+		"one zone, without preferred zone": {
+			zones: []string{"zone-a"},
+			verify: func(t *testing.T, sortedZones []string) {
+				require.Equal(t, []string{"zone-a"}, sortedZones)
+			},
+		},
+		"one zone, with preferred zone": {
+			zones:         []string{"zone-a"},
+			preferredZone: "zone-a",
+			verify: func(t *testing.T, sortedZones []string) {
+				require.Equal(t, []string{"zone-a"}, sortedZones)
+			},
+		},
+		"two zones, without preferred zone": {
+			zones: []string{"zone-a", "zone-b"},
+			verify: func(t *testing.T, sortedZones []string) {
+				require.ElementsMatch(t, []string{"zone-a", "zone-b"}, sortedZones)
+			},
+		},
+		"two zones, with preferred zone": {
+			zones:         []string{"zone-a", "zone-b"},
+			preferredZone: "zone-b",
+			verify: func(t *testing.T, sortedZones []string) {
+				require.Equal(t, []string{"zone-b", "zone-a"}, sortedZones)
+			},
+		},
+		"many zones, without preferred zone": {
+			zones: []string{"zone-a", "zone-b", "zone-c", "zone-d"},
+			verify: func(t *testing.T, sortedZones []string) {
+				require.ElementsMatch(t, []string{"zone-a", "zone-b", "zone-c", "zone-d"}, sortedZones)
+			},
+		},
+		"many zones, with preferred zone": {
+			zones:         []string{"zone-a", "zone-b", "zone-c", "zone-d"},
+			preferredZone: "zone-b",
+			verify: func(t *testing.T, sortedZones []string) {
+				require.Len(t, sortedZones, 4)
+				require.Equal(t, "zone-b", sortedZones[0])
+				require.ElementsMatch(t, []string{"zone-a", "zone-c", "zone-d"}, sortedZones[1:])
+			},
+		},
+	}
+
+	for name, testCase := range testCases {
+		t.Run(name, func(t *testing.T) {
+			sorted := queryIngesterPartitionsRingZoneSorter(testCase.preferredZone)(testCase.zones)
 			testCase.verify(t, sorted)
 		})
 	}
@@ -5602,4 +7670,24 @@ func (m *mockInstanceClient) Check(_ context.Context, _ *grpc_health_v1.HealthCh
 func (m *mockInstanceClient) Push(ctx context.Context, _ *mimirpb.WriteRequest, _ ...grpc.CallOption) (*mimirpb.WriteResponse, error) {
 	m.md, _ = metadata.FromOutgoingContext(ctx)
 	return nil, nil
+}
+
+func cloneTimeseries(orig *mimirpb.TimeSeries) (*mimirpb.TimeSeries, error) {
+	data, err := orig.Marshal()
+	if err != nil {
+		return nil, err
+	}
+
+	cloned := &mimirpb.TimeSeries{}
+	err = cloned.Unmarshal(data)
+	return cloned, err
+}
+
+func clonePreallocTimeseries(orig mimirpb.PreallocTimeseries) (mimirpb.PreallocTimeseries, error) {
+	clonedSeries, err := cloneTimeseries(orig.TimeSeries)
+	if err != nil {
+		return mimirpb.PreallocTimeseries{}, err
+	}
+
+	return mimirpb.PreallocTimeseries{TimeSeries: clonedSeries}, nil
 }

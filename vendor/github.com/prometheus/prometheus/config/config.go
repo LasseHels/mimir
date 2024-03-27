@@ -82,7 +82,7 @@ func Load(s string, expandExternalLabels bool, logger log.Logger) (*Config, erro
 		return cfg, nil
 	}
 
-	b := labels.ScratchBuilder{}
+	b := labels.NewScratchBuilder(0)
 	cfg.GlobalConfig.ExternalLabels.Range(func(v labels.Label) {
 		newV := os.Expand(v.Value, func(s string) string {
 			if s == "$" {
@@ -97,6 +97,7 @@ func Load(s string, expandExternalLabels bool, logger log.Logger) (*Config, erro
 		if newV != v.Value {
 			level.Debug(logger).Log("msg", "External label replaced", "label", v.Name, "input", v.Value, "output", newV)
 		}
+		// Note newV can be blank. https://github.com/prometheus/prometheus/issues/11024
 		b.Add(v.Name, newV)
 	})
 	cfg.GlobalConfig.ExternalLabels = b.Labels()
@@ -158,6 +159,7 @@ var (
 		HonorLabels:             false,
 		HonorTimestamps:         true,
 		HTTPClientConfig:        config.DefaultHTTPClientConfig,
+		EnableCompression:       true,
 	}
 
 	// DefaultAlertmanagerConfig is the default alertmanager configuration.
@@ -453,12 +455,19 @@ var (
 		OpenMetricsText1_0_0: "application/openmetrics-text;version=1.0.0",
 	}
 
+	// DefaultScrapeProtocols is the set of scrape protocols that will be proposed
+	// to scrape target, ordered by priority.
 	DefaultScrapeProtocols = []ScrapeProtocol{
 		OpenMetricsText1_0_0,
 		OpenMetricsText0_0_1,
 		PrometheusText0_0_4,
 	}
-	DefaultNativeHistogramScrapeProtocols = []ScrapeProtocol{
+
+	// DefaultProtoFirstScrapeProtocols is like DefaultScrapeProtocols, but it
+	// favors protobuf Prometheus exposition format.
+	// Used by default for certain feature-flags like
+	// "native-histograms" and "created-timestamp-zero-ingestion".
+	DefaultProtoFirstScrapeProtocols = []ScrapeProtocol{
 		PrometheusProto,
 		OpenMetricsText1_0_0,
 		OpenMetricsText0_0_1,
@@ -582,6 +591,8 @@ type ScrapeConfig struct {
 	MetricsPath string `yaml:"metrics_path,omitempty"`
 	// The URL scheme with which to fetch metrics from targets.
 	Scheme string `yaml:"scheme,omitempty"`
+	// Indicator whether to request compressed response from the target.
+	EnableCompression bool `yaml:"enable_compression"`
 	// An uncompressed response body larger than this many bytes will cause the
 	// scrape to fail. 0 means no limit.
 	BodySizeLimit units.Base2Bytes `yaml:"body_size_limit,omitempty"`
@@ -600,9 +611,12 @@ type ScrapeConfig struct {
 	// More than this label value length post metric-relabeling will cause the
 	// scrape to fail. 0 means no limit.
 	LabelValueLengthLimit uint `yaml:"label_value_length_limit,omitempty"`
-	// More than this many buckets in a native histogram will cause the scrape to
-	// fail.
+	// If there are more than this many buckets in a native histogram,
+	// buckets will be merged to stay within the limit.
 	NativeHistogramBucketLimit uint `yaml:"native_histogram_bucket_limit,omitempty"`
+	// If the growth factor of one bucket to the next is smaller than this,
+	// buckets will be merged to increase the factor sufficiently.
+	NativeHistogramMinBucketFactor float64 `yaml:"native_histogram_min_bucket_factor,omitempty"`
 	// Keep no more than this many dropped targets per job.
 	// 0 means no limit.
 	KeepDroppedTargets uint `yaml:"keep_dropped_targets,omitempty"`
@@ -927,6 +941,8 @@ type AlertmanagerConfig struct {
 
 	// List of Alertmanager relabel configurations.
 	RelabelConfigs []*relabel.Config `yaml:"relabel_configs,omitempty"`
+	// Relabel alerts before sending to the specific alertmanager.
+	AlertRelabelConfigs []*relabel.Config `yaml:"alert_relabel_configs,omitempty"`
 }
 
 // SetDirectory joins any relative file paths with dir.
@@ -966,6 +982,12 @@ func (c *AlertmanagerConfig) UnmarshalYAML(unmarshal func(interface{}) error) er
 	for _, rlcfg := range c.RelabelConfigs {
 		if rlcfg == nil {
 			return errors.New("empty or null Alertmanager target relabeling rule")
+		}
+	}
+
+	for _, rlcfg := range c.AlertRelabelConfigs {
+		if rlcfg == nil {
+			return errors.New("empty or null Alertmanager alert relabeling rule")
 		}
 	}
 
@@ -1114,6 +1136,9 @@ type QueueConfig struct {
 	MinBackoff       model.Duration `yaml:"min_backoff,omitempty"`
 	MaxBackoff       model.Duration `yaml:"max_backoff,omitempty"`
 	RetryOnRateLimit bool           `yaml:"retry_on_http_429,omitempty"`
+
+	// Samples older than the limit will be dropped.
+	SampleAgeLimit model.Duration `yaml:"sample_age_limit,omitempty"`
 }
 
 // MetadataConfig is the configuration for sending metadata to remote

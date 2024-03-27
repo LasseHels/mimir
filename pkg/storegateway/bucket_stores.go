@@ -21,7 +21,6 @@ import (
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/prometheus/common/model"
 	tsdb_errors "github.com/prometheus/prometheus/tsdb/errors"
 	"github.com/prometheus/prometheus/tsdb/hashcache"
 	"github.com/thanos-io/objstore"
@@ -31,7 +30,9 @@ import (
 	"github.com/grafana/mimir/pkg/storage/tsdb"
 	"github.com/grafana/mimir/pkg/storage/tsdb/block"
 	"github.com/grafana/mimir/pkg/storegateway/indexcache"
+	"github.com/grafana/mimir/pkg/storegateway/storegatewaypb"
 	"github.com/grafana/mimir/pkg/storegateway/storepb"
+	"github.com/grafana/mimir/pkg/util"
 	util_log "github.com/grafana/mimir/pkg/util/log"
 	"github.com/grafana/mimir/pkg/util/spanlogger"
 	"github.com/grafana/mimir/pkg/util/validation"
@@ -76,17 +77,19 @@ type BucketStores struct {
 	storesMu sync.RWMutex
 	stores   map[string]*BucketStore
 
+	// Tenants that are specifically enabled or disabled via configuration
+	allowedTenants *util.AllowedTenants
+
 	// Metrics.
-	syncTimes              prometheus.Histogram
-	syncLastSuccess        prometheus.Gauge
-	tenantsDiscovered      prometheus.Gauge
-	tenantsSynced          prometheus.Gauge
-	blocksLoaded           *prometheus.Desc
-	blocksLoadedByDuration *prometheus.Desc
+	syncTimes         prometheus.Histogram
+	syncLastSuccess   prometheus.Gauge
+	tenantsDiscovered prometheus.Gauge
+	tenantsSynced     prometheus.Gauge
+	blocksLoaded      *prometheus.Desc
 }
 
 // NewBucketStores makes a new BucketStores.
-func NewBucketStores(cfg tsdb.BlocksStorageConfig, shardingStrategy ShardingStrategy, bucketClient objstore.Bucket, limits *validation.Overrides, logger log.Logger, reg prometheus.Registerer) (*BucketStores, error) {
+func NewBucketStores(cfg tsdb.BlocksStorageConfig, shardingStrategy ShardingStrategy, bucketClient objstore.Bucket, allowedTenants *util.AllowedTenants, limits *validation.Overrides, logger log.Logger, reg prometheus.Registerer) (*BucketStores, error) {
 	chunksCacheClient, err := cache.CreateClient("chunks-cache", cfg.BucketStore.ChunksCache.BackendConfig, logger, prometheus.WrapRegistererWithPrefix("thanos_", reg))
 	if err != nil {
 		return nil, errors.Wrapf(err, "chunks-cache")
@@ -119,6 +122,7 @@ func NewBucketStores(cfg tsdb.BlocksStorageConfig, shardingStrategy ShardingStra
 		limits:             limits,
 		bucket:             cachingBucket,
 		shardingStrategy:   shardingStrategy,
+		allowedTenants:     allowedTenants,
 		stores:             map[string]*BucketStore{},
 		bucketStoreMetrics: NewBucketStoreMetrics(reg),
 		metaFetcherMetrics: NewMetadataFetcherMetrics(),
@@ -155,11 +159,6 @@ func NewBucketStores(cfg tsdb.BlocksStorageConfig, shardingStrategy ShardingStra
 		"cortex_bucket_store_blocks_loaded",
 		"Number of currently loaded blocks.",
 		nil, nil,
-	)
-	u.blocksLoadedByDuration = prometheus.NewDesc(
-		"cortex_bucket_store_blocks_loaded_by_duration",
-		"Number of currently loaded blocks, bucketed by block duration.",
-		[]string{"duration"}, nil,
 	)
 
 	// Init the index cache.
@@ -235,9 +234,6 @@ func (u *BucketStores) syncUsersBlocks(ctx context.Context, f func(context.Conte
 	errs := tsdb_errors.NewMulti()
 	errsMx := sync.Mutex{}
 
-	// Scan users in the bucket. In case of error, it may return a subset of users. If we sync a subset of users
-	// during a periodic sync, we may end up unloading blocks for users that still belong to this store-gateway
-	// so we do prefer to not run the sync at all.
 	userIDs, err := u.scanUsers(ctx)
 	if err != nil {
 		return err
@@ -309,8 +305,8 @@ func (u *BucketStores) syncUsersBlocks(ctx context.Context, f func(context.Conte
 	return errs.Err()
 }
 
-// Series implements the storepb.StoreServer interface, making a series request to the underlying user bucket store.
-func (u *BucketStores) Series(req *storepb.SeriesRequest, srv storepb.Store_SeriesServer) error {
+// Series implements the storegatewaypb.StoreGatewayServer interface, making a series request to the underlying user bucket store.
+func (u *BucketStores) Series(req *storepb.SeriesRequest, srv storegatewaypb.StoreGateway_SeriesServer) error {
 	spanLog, spanCtx := spanlogger.NewWithLogger(srv.Context(), u.logger, "BucketStores.Series")
 	defer spanLog.Span.Finish()
 
@@ -325,12 +321,12 @@ func (u *BucketStores) Series(req *storepb.SeriesRequest, srv storepb.Store_Seri
 	}
 
 	return store.Series(req, spanSeriesServer{
-		Store_SeriesServer: srv,
-		ctx:                spanCtx,
+		StoreGateway_SeriesServer: srv,
+		ctx:                       spanCtx,
 	})
 }
 
-// LabelNames implements the storepb.StoreServer interface.
+// LabelNames implements the storegatewaypb.StoreGatewayServer interface.
 func (u *BucketStores) LabelNames(ctx context.Context, req *storepb.LabelNamesRequest) (*storepb.LabelNamesResponse, error) {
 	spanLog, spanCtx := spanlogger.NewWithLogger(ctx, u.logger, "BucketStores.LabelNames")
 	defer spanLog.Span.Finish()
@@ -348,7 +344,7 @@ func (u *BucketStores) LabelNames(ctx context.Context, req *storepb.LabelNamesRe
 	return store.LabelNames(ctx, req)
 }
 
-// LabelValues implements the storepb.StoreServer interface.
+// LabelValues implements the storegatewaypb.StoreGatewayServer interface.
 func (u *BucketStores) LabelValues(ctx context.Context, req *storepb.LabelValuesRequest) (*storepb.LabelValuesResponse, error) {
 	spanLog, spanCtx := spanlogger.NewWithLogger(ctx, u.logger, "BucketStores.LabelValues")
 	defer spanLog.Span.Finish()
@@ -366,10 +362,22 @@ func (u *BucketStores) LabelValues(ctx context.Context, req *storepb.LabelValues
 	return store.LabelValues(ctx, req)
 }
 
-// scanUsers in the bucket and return the list of found users. If an error occurs while
-// iterating the bucket, it may return both an error and a subset of the users in the bucket.
+// scanUsers in the bucket and return the list of found users, respecting any specifically
+// enabled or disabled users.
 func (u *BucketStores) scanUsers(ctx context.Context) ([]string, error) {
-	return tsdb.ListUsers(ctx, u.bucket)
+	users, err := tsdb.ListUsers(ctx, u.bucket)
+	if err != nil {
+		return nil, err
+	}
+
+	filtered := make([]string, 0, len(users))
+	for _, user := range users {
+		if u.allowedTenants.IsAllowed(user) {
+			filtered = append(filtered, user)
+		}
+	}
+
+	return filtered, nil
 }
 
 func (u *BucketStores) getStore(userID string) *BucketStore {
@@ -546,10 +554,8 @@ func (u *BucketStores) closeBucketStoreAndDeleteLocalFilesForExcludedTenants(inc
 	}
 }
 
-// countBlocksLoaded returns the total number of blocks loaded and the number of blocks
-// loaded bucketed by the provided block durations, summed for all users.
-func (u *BucketStores) countBlocksLoaded(durations []time.Duration) (int, map[time.Duration]int) {
-	byDuration := make(map[time.Duration]int)
+// countBlocksLoaded returns the total number of blocks loaded, summed for all users.
+func (u *BucketStores) countBlocksLoaded(durations []time.Duration) int {
 	total := 0
 
 	u.storesMu.RLock()
@@ -557,28 +563,21 @@ func (u *BucketStores) countBlocksLoaded(durations []time.Duration) (int, map[ti
 
 	for _, store := range u.stores {
 		stats := store.Stats(durations)
-		for d, n := range stats.BlocksLoaded {
-			byDuration[d] += n
+		for _, n := range stats.BlocksLoaded {
 			total += n
 		}
 	}
 
-	return total, byDuration
+	return total
 }
 
 func (u *BucketStores) Describe(descs chan<- *prometheus.Desc) {
 	descs <- u.blocksLoaded
-	descs <- u.blocksLoadedByDuration
 }
 
 func (u *BucketStores) Collect(metrics chan<- prometheus.Metric) {
-	total, byDuration := u.countBlocksLoaded(defaultBlockDurations)
+	total := u.countBlocksLoaded(defaultBlockDurations)
 	metrics <- prometheus.MustNewConstMetric(u.blocksLoaded, prometheus.GaugeValue, float64(total))
-	for d, n := range byDuration {
-		// Convert time.Duration to model.Duration here since the string format is nicer
-		// to read for round numbers than the stdlib version. E.g. "2h" vs "2h0m0s"
-		metrics <- prometheus.MustNewConstMetric(u.blocksLoadedByDuration, prometheus.GaugeValue, float64(n), model.Duration(d).String())
-	}
 }
 
 func getUserIDFromGRPCContext(ctx context.Context) string {
@@ -596,7 +595,7 @@ func getUserIDFromGRPCContext(ctx context.Context) string {
 }
 
 type spanSeriesServer struct {
-	storepb.Store_SeriesServer
+	storegatewaypb.StoreGateway_SeriesServer
 
 	ctx context.Context
 }

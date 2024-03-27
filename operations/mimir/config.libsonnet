@@ -37,6 +37,7 @@
     query_frontend_topology_spread_max_skew: 1,
     querier_topology_spread_max_skew: 1,
     ruler_topology_spread_max_skew: 1,
+    ruler_querier_topology_spread_max_skew: 1,
 
     // Controls how many concurrent queries are run in the querier.
     querier_max_concurrency: 8,
@@ -98,8 +99,6 @@
 
     // When store_gateway_lazy_loading_enabled: true, block index-headers are pre-downloaded but lazy loaded at query time.
     // Enabling lazy loading results in faster startup times at the cost of some latency during query time.
-    // store_gateway_lazy_loading_enabled: false will also reduce the concurrency of blocks syncing;
-    // this improves startup times when running on HDDs instead of SSDs as it reduces random reads.
     store_gateway_lazy_loading_enabled: true,
 
     // Number of memcached replicas for each memcached statefulset
@@ -107,21 +106,25 @@
 
     cache_frontend_enabled: true,
     cache_frontend_max_item_size_mb: 5,
+    cache_frontend_connection_limit: 16384,
     cache_frontend_backend: 'memcached',
     memcached_frontend_mtls_enabled: false,
 
     cache_index_queries_enabled: true,
     cache_index_queries_max_item_size_mb: 5,
+    cache_index_queries_connection_limit: 16384,
     cache_index_queries_backend: 'memcached',
     memcached_index_queries_mtls_enabled: false,
 
     cache_chunks_enabled: true,
     cache_chunks_max_item_size_mb: 1,
+    cache_chunks_connection_limit: 16384,
     cache_chunks_backend: 'memcached',
     memcached_chunks_mtls_enabled: false,
 
     cache_metadata_enabled: true,
     cache_metadata_max_item_size_mb: 1,
+    cache_metadata_connection_limit: 16384,
     cache_metadata_backend: 'memcached',
     memcached_metadata_mtls_enabled: false,
 
@@ -219,6 +222,10 @@
       'store-gateway.sharding-ring.consul.hostname': 'consul.%(namespace)s.svc.%(cluster_domain)s:8500' % $._config,
       'store-gateway.sharding-ring.prefix': '',
       'store-gateway.sharding-ring.replication-factor': $._config.store_gateway_replication_factor,
+
+      // Relax pressure on KV store when running at scale.
+      // When changing this, please remember to also change the hearbeat period defined in store_gateway_args.
+      'store-gateway.sharding-ring.heartbeat-timeout': '4m',
     },
 
     // Querier component config (shared between the ruler and querier).
@@ -239,9 +246,12 @@
       'ingester.ring.consul.hostname': 'consul.%(namespace)s.svc.%(cluster_domain)s:8500' % $._config,
       'ingester.ring.replication-factor': $._config.replication_factor,
       'distributor.health-check-ingesters': true,
-      'ingester.ring.heartbeat-timeout': '10m',
       'ingester.ring.store': 'consul',
       'ingester.ring.prefix': '',
+
+      // Relax pressure on KV store when running at scale.
+      // When changing this, please remember to also change the hearbeat period defined in ingester_args.
+      'ingester.ring.heartbeat-timeout': '10m',
     },
 
     local querySchedulerRingConfig = {
@@ -689,6 +699,7 @@
             'blocks-storage.bucket-store.index-cache.memcached.addresses': 'dnssrvnoa+%(cache_index_queries_backend)s-index-queries.%(namespace)s.svc.%(cluster_domain)s:11211' % $._config,
             'blocks-storage.bucket-store.index-cache.memcached.max-item-size': $._config.cache_index_queries_max_item_size_mb * 1024 * 1024,
             'blocks-storage.bucket-store.index-cache.memcached.max-async-concurrency': 50,
+            'blocks-storage.bucket-store.index-cache.memcached.timeout': '450ms',
           } + if $._config.memcached_index_queries_mtls_enabled then {
             'blocks-storage.bucket-store.index-cache.memcached.addresses': 'dnssrvnoa+%(cache_index_queries_backend)s-index-queries.%(namespace)s.svc.%(cluster_domain)s:11212' % $._config,
             'blocks-storage.bucket-store.index-cache.memcached.connect-timeout': '1s',

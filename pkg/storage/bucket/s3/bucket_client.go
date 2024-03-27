@@ -60,6 +60,7 @@ func newS3Config(cfg Config) (s3.Config, error) {
 		SendContentMd5:     cfg.SendContentMd5,
 		SSEConfig:          sseCfg,
 		ListObjectsVersion: cfg.ListObjectsVersion,
+		BucketLookupType:   cfg.BucketLookupType,
 		AWSSDKAuth:         cfg.NativeAWSAuthEnabled,
 		PartSize:           cfg.PartSize,
 		HTTPConfig: s3.HTTPConfig{
@@ -75,5 +76,6 @@ func newS3Config(cfg Config) (s3.Config, error) {
 		},
 		// Enforce signature version 2 if CLI flag is set
 		SignatureV2: cfg.SignatureVersion == SignatureVersionV2,
+		STSEndpoint: cfg.STSEndpoint,
 	}, nil
 }

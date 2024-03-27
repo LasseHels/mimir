@@ -23,13 +23,13 @@ import (
 	"github.com/go-kit/log"
 	"github.com/grafana/dskit/backoff"
 	"github.com/grafana/dskit/flagext"
+	"github.com/grafana/dskit/grpcutil"
 	"github.com/grafana/dskit/kv/consul"
 	dskit_metrics "github.com/grafana/dskit/metrics"
 	"github.com/grafana/dskit/ring"
 	"github.com/grafana/dskit/services"
 	dstest "github.com/grafana/dskit/test"
 	"github.com/oklog/ulid"
-	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/prometheus/prometheus/model/histogram"
@@ -1192,7 +1192,7 @@ func TestStoreGateway_Series_QuerySharding(t *testing.T) {
 
 					actualMetrics := make([]string, 0, len(seriesSet))
 					for _, s := range seriesSet {
-						actualMetrics = append(actualMetrics, s.PromLabels().Get(labels.MetricName))
+						actualMetrics = append(actualMetrics, promLabels(s).Get(labels.MetricName))
 					}
 					assert.ElementsMatch(t, testData.expectedMetrics, actualMetrics)
 				})
@@ -1420,7 +1420,7 @@ func TestStoreGateway_SeriesQueryingShouldEnforceMaxChunksPerQueryLimit(t *testi
 		},
 		"should return error if the actual number of queried chunks is > limit": {
 			limit:       chunksQueried - 1,
-			expectedErr: status.Error(http.StatusUnprocessableEntity, "rpc error: code = Code(422) desc = "+fmt.Sprintf(limiter.MaxChunksPerQueryLimitMsgFormat, chunksQueried-1)),
+			expectedErr: status.Error(http.StatusUnprocessableEntity, fmt.Sprintf("rpc error: code = Code(422) desc = %s", limiter.NewMaxChunksPerQueryLimitError(chunksQueried-1))),
 		},
 	}
 
@@ -1481,9 +1481,9 @@ func TestStoreGateway_SeriesQueryingShouldEnforceMaxChunksPerQueryLimit(t *testi
 					if testData.expectedErr != nil {
 						require.Error(t, err)
 						assert.IsType(t, testData.expectedErr, err)
-						s1, ok := status.FromError(errors.Cause(err))
+						s1, ok := grpcutil.ErrorToStatus(err)
 						assert.True(t, ok)
-						s2, ok := status.FromError(errors.Cause(testData.expectedErr))
+						s2, ok := grpcutil.ErrorToStatus(testData.expectedErr)
 						assert.True(t, ok)
 						assert.Contains(t, s1.Message(), s2.Message())
 						assert.Equal(t, s1.Code(), s2.Code())

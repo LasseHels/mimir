@@ -15,12 +15,13 @@ package tsdb
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"math"
+	"slices"
 	"sync"
 
 	"github.com/go-kit/log/level"
-	"github.com/pkg/errors"
-	"golang.org/x/exp/slices"
 
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/storage"
@@ -137,7 +138,7 @@ func (h *headIndexReader) SortedPostings(p index.Postings) index.Postings {
 		}
 	}
 	if err := p.Err(); err != nil {
-		return index.ErrPostings(errors.Wrap(err, "expand postings"))
+		return index.ErrPostings(fmt.Errorf("expand postings: %w", err))
 	}
 
 	slices.SortFunc(series, func(a, b *memSeries) int {
@@ -152,7 +153,13 @@ func (h *headIndexReader) SortedPostings(p index.Postings) index.Postings {
 	return index.NewListPostings(ep)
 }
 
+// ShardedPostings implements IndexReader. This function returns an failing postings list if sharding
+// has not been enabled in the Head.
 func (h *headIndexReader) ShardedPostings(p index.Postings, shardIndex, shardCount uint64) index.Postings {
+	if !h.head.opts.EnableSharding {
+		return index.ErrPostings(errors.New("sharding is disabled"))
+	}
+
 	out := make([]storage.SeriesRef, 0, 128)
 
 	for p.Next() {
@@ -173,7 +180,19 @@ func (h *headIndexReader) ShardedPostings(p index.Postings, shardIndex, shardCou
 	return index.NewListPostings(out)
 }
 
+// LabelValuesFor returns LabelValues for the given label name in the series referred to by postings.
+func (h *headIndexReader) LabelValuesFor(postings index.Postings, name string) storage.LabelValues {
+	return h.head.postings.LabelValuesFor(postings, name)
+}
+
+// LabelValuesExcluding returns LabelValues for the given label name in all other series than those referred to by postings.
+// This is useful for obtaining label values for other postings than the ones you wish to exclude.
+func (h *headIndexReader) LabelValuesExcluding(postings index.Postings, name string) storage.LabelValues {
+	return h.head.postings.LabelValuesExcluding(postings, name)
+}
+
 // Series returns the series for the given reference.
+// Chunks are skipped if chks is nil.
 func (h *headIndexReader) Series(ref storage.SeriesRef, builder *labels.ScratchBuilder, chks *[]chunks.Meta) error {
 	s := h.head.series.getByID(chunks.HeadSeriesRef(ref))
 
@@ -318,10 +337,10 @@ func (h *headChunkReader) Close() error {
 	return nil
 }
 
-// Chunk returns the chunk for the reference number.
-func (h *headChunkReader) Chunk(meta chunks.Meta) (chunkenc.Chunk, error) {
+// ChunkOrIterable returns the chunk for the reference number.
+func (h *headChunkReader) ChunkOrIterable(meta chunks.Meta) (chunkenc.Chunk, chunkenc.Iterable, error) {
 	chk, _, err := h.chunk(meta, false)
-	return chk, err
+	return chk, nil, err
 }
 
 // ChunkWithCopy returns the chunk for the reference number.
@@ -417,7 +436,8 @@ func (s *memSeries) chunk(id chunks.HeadChunkID, cdm chunkDiskMapper, memChunkPo
 	if ix < len(s.mmappedChunks) {
 		chk, err := cdm.Chunk(s.mmappedChunks[ix].ref)
 		if err != nil {
-			if _, ok := err.(*chunks.CorruptionErr); ok {
+			var cerr *chunks.CorruptionErr
+			if errors.As(err, &cerr) {
 				panic(err)
 			}
 			return nil, false, false, err
@@ -445,13 +465,13 @@ func (s *memSeries) chunk(id chunks.HeadChunkID, cdm chunkDiskMapper, memChunkPo
 	return elem, true, offset == 0, nil
 }
 
-// oooMergedChunk returns the requested chunk based on the given chunks.Meta
-// reference from memory or by m-mapping it from the disk. The returned chunk
-// might be a merge of all the overlapping chunks, if any, amongst all the
-// chunks in the OOOHead.
+// oooMergedChunks return an iterable over one or more OOO chunks for the given
+// chunks.Meta reference from memory or by m-mapping it from the disk. The
+// returned iterable will be a merge of all the overlapping chunks, if any,
+// amongst all the chunks in the OOOHead.
 // This function is not thread safe unless the caller holds a lock.
 // The caller must ensure that s.ooo is not nil.
-func (s *memSeries) oooMergedChunk(meta chunks.Meta, cdm chunkDiskMapper, mint, maxt int64) (chunk *mergedOOOChunks, err error) {
+func (s *memSeries) oooMergedChunks(meta chunks.Meta, cdm chunkDiskMapper, mint, maxt int64) (*mergedOOOChunks, error) {
 	_, cid := chunks.HeadChunkRef(meta.Ref).Unpack()
 
 	// ix represents the index of chunk in the s.mmappedChunks slice. The chunk meta's are
@@ -528,11 +548,13 @@ func (s *memSeries) oooMergedChunk(meta chunks.Meta, cdm chunkDiskMapper, mint, 
 	mc := &mergedOOOChunks{}
 	absoluteMax := int64(math.MinInt64)
 	for _, c := range tmpChks {
-		if c.meta.Ref != meta.Ref && (len(mc.chunks) == 0 || c.meta.MinTime > absoluteMax) {
+		if c.meta.Ref != meta.Ref && (len(mc.chunkIterables) == 0 || c.meta.MinTime > absoluteMax) {
 			continue
 		}
+		var iterable chunkenc.Iterable
 		if c.meta.Ref == oooHeadRef {
 			var xor *chunkenc.XORChunk
+			var err error
 			// If head chunk min and max time match the meta OOO markers
 			// that means that the chunk has not expanded so we can append
 			// it as it is.
@@ -543,14 +565,15 @@ func (s *memSeries) oooMergedChunk(meta chunks.Meta, cdm chunkDiskMapper, mint, 
 				xor, err = s.ooo.oooHeadChunk.chunk.ToXORBetweenTimestamps(meta.OOOLastMinTime, meta.OOOLastMaxTime)
 			}
 			if err != nil {
-				return nil, errors.Wrap(err, "failed to convert ooo head chunk to xor chunk")
+				return nil, fmt.Errorf("failed to convert ooo head chunk to xor chunk: %w", err)
 			}
-			c.meta.Chunk = xor
+			iterable = xor
 		} else {
 			chk, err := cdm.Chunk(c.ref)
 			if err != nil {
-				if _, ok := err.(*chunks.CorruptionErr); ok {
-					return nil, errors.Wrap(err, "invalid ooo mmapped chunk")
+				var cerr *chunks.CorruptionErr
+				if errors.As(err, &cerr) {
+					return nil, fmt.Errorf("invalid ooo mmapped chunk: %w", err)
 				}
 				return nil, err
 			}
@@ -560,12 +583,12 @@ func (s *memSeries) oooMergedChunk(meta chunks.Meta, cdm chunkDiskMapper, mint, 
 				// wrap the chunk within a chunk that doesnt allows us to iterate
 				// through samples out of the OOOLastMinT and OOOLastMaxT
 				// markers.
-				c.meta.Chunk = boundedChunk{chk, meta.OOOLastMinTime, meta.OOOLastMaxTime}
+				iterable = boundedIterable{chk, meta.OOOLastMinTime, meta.OOOLastMaxTime}
 			} else {
-				c.meta.Chunk = chk
+				iterable = chk
 			}
 		}
-		mc.chunks = append(mc.chunks, c.meta)
+		mc.chunkIterables = append(mc.chunkIterables, iterable)
 		if c.meta.MaxTime > absoluteMax {
 			absoluteMax = c.meta.MaxTime
 		}
@@ -574,77 +597,30 @@ func (s *memSeries) oooMergedChunk(meta chunks.Meta, cdm chunkDiskMapper, mint, 
 	return mc, nil
 }
 
-var _ chunkenc.Chunk = &mergedOOOChunks{}
+var _ chunkenc.Iterable = &mergedOOOChunks{}
 
-// mergedOOOChunks holds the list of overlapping chunks. This struct satisfies
-// chunkenc.Chunk.
+// mergedOOOChunks holds the list of iterables for overlapping chunks.
 type mergedOOOChunks struct {
-	chunks []chunks.Meta
-}
-
-// Bytes is a very expensive method because its calling the iterator of all the
-// chunks in the mergedOOOChunk and building a new chunk with the samples.
-func (o mergedOOOChunks) Bytes() []byte {
-	xc := chunkenc.NewXORChunk()
-	app, err := xc.Appender()
-	if err != nil {
-		panic(err)
-	}
-	it := o.Iterator(nil)
-	for it.Next() == chunkenc.ValFloat {
-		t, v := it.At()
-		app.Append(t, v)
-	}
-
-	return xc.Bytes()
-}
-
-func (o mergedOOOChunks) Encoding() chunkenc.Encoding {
-	return chunkenc.EncXOR
-}
-
-func (o mergedOOOChunks) Appender() (chunkenc.Appender, error) {
-	return nil, errors.New("can't append to mergedOOOChunks")
+	chunkIterables []chunkenc.Iterable
 }
 
 func (o mergedOOOChunks) Iterator(iterator chunkenc.Iterator) chunkenc.Iterator {
-	return storage.ChainSampleIteratorFromMetas(iterator, o.chunks)
+	return storage.ChainSampleIteratorFromIterables(iterator, o.chunkIterables)
 }
 
-func (o mergedOOOChunks) NumSamples() int {
-	samples := 0
-	for _, c := range o.chunks {
-		samples += c.Chunk.NumSamples()
-	}
-	return samples
-}
+var _ chunkenc.Iterable = &boundedIterable{}
 
-func (o mergedOOOChunks) Compact() {}
-
-var _ chunkenc.Chunk = &boundedChunk{}
-
-// boundedChunk is an implementation of chunkenc.Chunk that uses a
+// boundedIterable is an implementation of chunkenc.Iterable that uses a
 // boundedIterator that only iterates through samples which timestamps are
 // >= minT and <= maxT.
-type boundedChunk struct {
-	chunkenc.Chunk
-	minT int64
-	maxT int64
+type boundedIterable struct {
+	chunk chunkenc.Chunk
+	minT  int64
+	maxT  int64
 }
 
-func (b boundedChunk) Bytes() []byte {
-	xor := chunkenc.NewXORChunk()
-	a, _ := xor.Appender()
-	it := b.Iterator(nil)
-	for it.Next() == chunkenc.ValFloat {
-		t, v := it.At()
-		a.Append(t, v)
-	}
-	return xor.Bytes()
-}
-
-func (b boundedChunk) Iterator(iterator chunkenc.Iterator) chunkenc.Iterator {
-	it := b.Chunk.Iterator(iterator)
+func (b boundedIterable) Iterator(iterator chunkenc.Iterator) chunkenc.Iterator {
+	it := b.chunk.Iterator(iterator)
 	if it == nil {
 		panic("iterator shouldn't be nil")
 	}
@@ -753,7 +729,7 @@ func (s *memSeries) iterator(id chunks.HeadChunkID, c chunkenc.Chunk, isoState *
 
 		// Removing the extra transactionIDs that are relevant for samples that
 		// come after this chunk, from the total transactionIDs.
-		appendIDsToConsider := s.txs.txIDCount - (totalSamples - (previousSamples + numSamples))
+		appendIDsToConsider := int(s.txs.txIDCount) - (totalSamples - (previousSamples + numSamples))
 
 		// Iterate over the appendIDs, find the first one that the isolation state says not
 		// to return.

@@ -41,8 +41,6 @@ spec:
         runAsUser: 10001
         seccompProfile:
           type: RuntimeDefault
-      initContainers:
-        []
       containers:
         - name: nginx
           image: docker.io/nginxinc/nginx-unprivileged:1.25-alpine
@@ -50,7 +48,8 @@ spec:
           args:
           volumeMounts:
             - name: nginx-config
-              mountPath: /etc/nginx
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
             - name: tmp
               mountPath: /tmp
             - name: docker-entrypoint-d-override
@@ -77,10 +76,6 @@ spec:
             readOnlyRootFilesystem: true
           env:
           envFrom:
-      nodeSelector:
-        {}
-      affinity:
-        {}
       topologySpreadConstraints:
       - maxSkew: 1
         topologyKey: kubernetes.io/hostname

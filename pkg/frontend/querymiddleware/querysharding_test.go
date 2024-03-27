@@ -38,9 +38,9 @@ import (
 	apierror "github.com/grafana/mimir/pkg/api/error"
 	"github.com/grafana/mimir/pkg/frontend/querymiddleware/astmapper"
 	"github.com/grafana/mimir/pkg/mimirpb"
+	"github.com/grafana/mimir/pkg/querier"
 	"github.com/grafana/mimir/pkg/storage/sharding"
 	"github.com/grafana/mimir/pkg/util"
-	"github.com/grafana/mimir/pkg/util/validation"
 )
 
 var (
@@ -50,8 +50,8 @@ var (
 	lookbackDelta = 5 * time.Minute
 )
 
-func mockHandlerWith(resp *PrometheusResponse, err error) Handler {
-	return HandlerFunc(func(ctx context.Context, req Request) (Response, error) {
+func mockHandlerWith(resp *PrometheusResponse, err error) MetricsQueryHandler {
+	return HandlerFunc(func(ctx context.Context, req MetricsQueryRequest) (Response, error) {
 		if expired := ctx.Err(); expired != nil {
 			return nil, expired
 		}
@@ -681,7 +681,7 @@ func TestQuerySharding_Correctness(t *testing.T) {
 
 		t.Run(testName, func(t *testing.T) {
 			t.Parallel()
-			reqs := []Request{
+			reqs := []MetricsQueryRequest{
 				&PrometheusInstantQueryRequest{
 					Path:  "/query",
 					Time:  util.TimeToMillis(end),
@@ -763,6 +763,82 @@ func TestQuerySharding_Correctness(t *testing.T) {
 								"cortex_frontend_sharded_queries_total"))
 						})
 					}
+				})
+			}
+		})
+	}
+}
+
+func TestQuerySharding_NonMonotonicHistogramBuckets(t *testing.T) {
+	queries := []string{
+		`histogram_quantile(1, sum by(le) (rate(metric_histogram_bucket[1m])))`,
+	}
+
+	series := []*promql.StorageSeries{}
+	for i := 0; i < 100; i++ {
+		series = append(series, newSeries(labels.FromStrings(labels.MetricName, "metric_histogram_bucket", "app", strconv.Itoa(i), "le", "10"), start.Add(-lookbackDelta), end, step, arithmeticSequence(1)))
+		series = append(series, newSeries(labels.FromStrings(labels.MetricName, "metric_histogram_bucket", "app", strconv.Itoa(i), "le", "20"), start.Add(-lookbackDelta), end, step, arithmeticSequence(3)))
+		series = append(series, newSeries(labels.FromStrings(labels.MetricName, "metric_histogram_bucket", "app", strconv.Itoa(i), "le", "30"), start.Add(-lookbackDelta), end, step, arithmeticSequence(3)))
+		series = append(series, newSeries(labels.FromStrings(labels.MetricName, "metric_histogram_bucket", "app", strconv.Itoa(i), "le", "40"), start.Add(-lookbackDelta), end, step, arithmeticSequence(3)))
+		series = append(series, newSeries(labels.FromStrings(labels.MetricName, "metric_histogram_bucket", "app", strconv.Itoa(i), "le", "+Inf"), start.Add(-lookbackDelta), end, step, arithmeticSequence(3)))
+	}
+
+	// Create a queryable on the fixtures.
+	queryable := storageSeriesQueryable(series)
+
+	engine := newEngine()
+	downstream := &downstreamHandler{
+		engine:    engine,
+		queryable: queryable,
+	}
+
+	for _, query := range queries {
+		t.Run(query, func(t *testing.T) {
+			req := &PrometheusRangeQueryRequest{
+				Path:  "/query_range",
+				Start: util.TimeToMillis(start),
+				End:   util.TimeToMillis(end),
+				Step:  step.Milliseconds(),
+				Query: query,
+			}
+
+			// Run the query without sharding.
+			expectedRes, err := downstream.Do(context.Background(), req)
+			require.Nil(t, err)
+
+			expectedPrometheusRes := expectedRes.(*PrometheusResponse)
+			sort.Sort(byLabels(expectedPrometheusRes.Data.Result))
+
+			// Ensure the query produces some results.
+			require.NotEmpty(t, expectedPrometheusRes.Data.Result)
+			requireValidSamples(t, expectedPrometheusRes.Data.Result)
+
+			// Ensure the bucket monotonicity has not been fixed by PromQL engine.
+			require.Len(t, expectedPrometheusRes.GetWarnings(), 0)
+
+			for _, numShards := range []int{8, 16} {
+				t.Run(fmt.Sprintf("shards=%d", numShards), func(t *testing.T) {
+					reg := prometheus.NewPedanticRegistry()
+					shardingware := newQueryShardingMiddleware(
+						log.NewNopLogger(),
+						engine,
+						mockLimits{totalShards: numShards},
+						0,
+						reg,
+					)
+
+					// Run the query with sharding.
+					shardedRes, err := shardingware.Wrap(downstream).Do(user.InjectOrgID(context.Background(), "test"), req)
+					require.Nil(t, err)
+
+					// Ensure the two results matches (float precision can slightly differ, there's no guarantee in PromQL engine too
+					// if you rerun the same query twice).
+					shardedPrometheusRes := shardedRes.(*PrometheusResponse)
+					sort.Sort(byLabels(shardedPrometheusRes.Data.Result))
+					approximatelyEquals(t, expectedPrometheusRes, shardedPrometheusRes)
+
+					// Ensure the warning about bucket monotonicity from PromQL engine is hidden.
+					require.Len(t, shardedPrometheusRes.GetWarnings(), 0)
 				})
 			}
 		})
@@ -889,6 +965,10 @@ type queryShardingFunctionCorrectnessTest struct {
 // TestQuerySharding_FunctionCorrectness is the old test that probably at some point inspired the TestQuerySharding_Correctness,
 // we keep it here since it adds more test cases.
 func TestQuerySharding_FunctionCorrectness(t *testing.T) {
+	// We want to test experimental functions too.
+	t.Cleanup(func() { parser.EnableExperimentalFunctions = false })
+	parser.EnableExperimentalFunctions = true
+
 	testsForBoth := []queryShardingFunctionCorrectnessTest{
 		{fn: "count_over_time", rangeQuery: true},
 		{fn: "days_in_month"},
@@ -904,6 +984,8 @@ func TestQuerySharding_FunctionCorrectness(t *testing.T) {
 		{fn: "resets", rangeQuery: true},
 		{fn: "sort"},
 		{fn: "sort_desc"},
+		{fn: "sort_by_label"},
+		{fn: "sort_by_label_desc"},
 		{fn: "last_over_time", rangeQuery: true},
 		{fn: "present_over_time", rangeQuery: true},
 		{fn: "timestamp"},
@@ -950,6 +1032,7 @@ func TestQuerySharding_FunctionCorrectness(t *testing.T) {
 		{fn: "sum_over_time", rangeQuery: true},
 		{fn: "quantile_over_time", rangeQuery: true, tpl: `(<fn>(0.5,bar1{}))`},
 		{fn: "quantile_over_time", rangeQuery: true, tpl: `(<fn>(0.99,bar1{}))`},
+		{fn: "mad_over_time", rangeQuery: true, tpl: `(<fn>(bar1{}))`},
 		{fn: "sgn"},
 		{fn: "predict_linear", args: []string{"1"}, rangeQuery: true},
 		{fn: "holt_winters", args: []string{"0.5", "0.7"}, rangeQuery: true},
@@ -1273,7 +1356,7 @@ func TestQuerySharding_ShouldSupportMaxShardedQueries(t *testing.T) {
 					ResultType: string(parser.ValueTypeVector),
 				},
 			}, nil).Run(func(args mock.Arguments) {
-				req := args[1].(Request)
+				req := args[1].(MetricsQueryRequest)
 				reqShard := regexp.MustCompile(`__query_shard__="[^"]+"`).FindString(req.GetQuery())
 
 				uniqueShardsMx.Lock()
@@ -1366,7 +1449,7 @@ func TestQuerySharding_ShouldSupportMaxRegexpSizeBytes(t *testing.T) {
 					ResultType: string(parser.ValueTypeVector),
 				},
 			}, nil).Run(func(args mock.Arguments) {
-				req := args[1].(Request)
+				req := args[1].(MetricsQueryRequest)
 				reqShard := regexp.MustCompile(`__query_shard__="[^"]+"`).FindString(req.GetQuery())
 
 				uniqueShardsMx.Lock()
@@ -1437,7 +1520,7 @@ func TestQuerySharding_ShouldReturnErrorInCorrectFormat(t *testing.T) {
 			return nil, apierror.New(apierror.TypeInternal, "some internal error")
 		})
 		queryablePrometheusExecErr = storage.QueryableFunc(func(mint, maxt int64) (storage.Querier, error) {
-			return nil, apierror.Newf(apierror.TypeExec, "expanding series: %s", validation.NewMaxQueryLengthError(744*time.Hour, 720*time.Hour))
+			return nil, apierror.Newf(apierror.TypeExec, "expanding series: %s", querier.NewMaxQueryLengthError(744*time.Hour, 720*time.Hour))
 		})
 		queryable = storageSeriesQueryable([]*promql.StorageSeries{
 			newSeries(labels.FromStrings("__name__", "bar1"), start.Add(-lookbackDelta), end, step, factor(5)),
@@ -1490,7 +1573,7 @@ func TestQuerySharding_ShouldReturnErrorInCorrectFormat(t *testing.T) {
 			engineDownstream: engine,
 			engineSharding:   engineSampleLimit,
 			queryable:        queryablePrometheusExecErr,
-			expError:         apierror.Newf(apierror.TypeExec, "expanding series: %s", validation.NewMaxQueryLengthError(744*time.Hour, 720*time.Hour)),
+			expError:         apierror.Newf(apierror.TypeExec, "expanding series: %s", querier.NewMaxQueryLengthError(744*time.Hour, 720*time.Hour)),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1598,7 +1681,7 @@ func TestQuerySharding_ShouldUseCardinalityEstimate(t *testing.T) {
 
 	tests := []struct {
 		name          string
-		req           Request
+		req           MetricsQueryRequest
 		expectedCalls int
 	}{
 		{
@@ -2064,7 +2147,7 @@ type downstreamHandler struct {
 	queryable storage.Queryable
 }
 
-func (h *downstreamHandler) Do(ctx context.Context, r Request) (Response, error) {
+func (h *downstreamHandler) Do(ctx context.Context, r MetricsQueryRequest) (Response, error) {
 	qry, err := newQuery(ctx, r, h.engine, h.queryable)
 	if err != nil {
 		return nil, err

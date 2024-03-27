@@ -12,11 +12,11 @@ import (
 	"time"
 
 	"github.com/gogo/status"
+	"github.com/grafana/dskit/grpcutil"
 	"github.com/grafana/dskit/httpgrpc"
 	"github.com/grafana/dskit/middleware"
 	"github.com/grafana/dskit/services"
 	"github.com/prometheus/common/model"
-	"github.com/prometheus/prometheus/model/labels"
 	"google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
 
@@ -28,11 +28,13 @@ import (
 
 const (
 	integerUnavailableMsgFormat = "ingester is unavailable (current state: %s)"
-	tooBusyErrorMsg             = "the ingester is currently too busy to process queries, try again later"
+	ingesterTooBusyMsg          = "ingester is currently too busy to process queries, try again later"
+	ingesterPushGrpcDisabledMsg = "ingester is configured with Push gRPC method disabled"
 )
 
 var (
-	tooBusyError = ingesterTooBusyError{}
+	errTooBusy          = ingesterTooBusyError{}
+	errPushGrpcDisabled = newErrorWithStatus(ingesterPushGrpcDisabledError{}, codes.Unimplemented)
 )
 
 // errorWithStatus is used for wrapping errors returned by ingester.
@@ -81,7 +83,7 @@ func newErrorWithStatus(originalErr error, code codes.Code) errorWithStatus {
 // and containing the given HTTP status code.
 func newErrorWithHTTPStatus(err error, code int) errorWithStatus {
 	errWithHTTPStatus := httpgrpc.Errorf(code, err.Error())
-	stat, _ := status.FromError(errWithHTTPStatus)
+	stat, _ := grpcutil.ErrorToStatus(errWithHTTPStatus)
 	return errorWithStatus{
 		err:    err,
 		status: stat,
@@ -208,7 +210,7 @@ func newSampleError(errID globalerror.ID, errMsg string, timestamp model.Time, l
 		errID:     errID,
 		errMsg:    errMsg,
 		timestamp: timestamp,
-		series:    mimirpb.FromLabelAdaptersToLabels(labels).String(),
+		series:    mimirpb.FromLabelAdaptersToString(labels),
 	}
 }
 
@@ -268,8 +270,8 @@ func newExemplarError(errID globalerror.ID, errMsg string, timestamp model.Time,
 		errID:          errID,
 		errMsg:         errMsg,
 		timestamp:      timestamp,
-		seriesLabels:   mimirpb.FromLabelAdaptersToLabels(seriesLabels).String(),
-		exemplarLabels: mimirpb.FromLabelAdaptersToLabels(exemplarLabels).String(),
+		seriesLabels:   mimirpb.FromLabelAdaptersToString(seriesLabels),
+		exemplarLabels: mimirpb.FromLabelAdaptersToString(exemplarLabels),
 	}
 }
 
@@ -314,8 +316,8 @@ func newTSDBIngestExemplarErr(ingestErr error, timestamp model.Time, seriesLabel
 	return tsdbIngestExemplarErr{
 		originalErr:    ingestErr,
 		timestamp:      timestamp,
-		seriesLabels:   mimirpb.FromLabelAdaptersToLabels(seriesLabels).String(),
-		exemplarLabels: mimirpb.FromLabelAdaptersToLabels(exemplarLabels).String(),
+		seriesLabels:   mimirpb.FromLabelAdaptersToString(seriesLabels),
+		exemplarLabels: mimirpb.FromLabelAdaptersToString(exemplarLabels),
 	}
 }
 
@@ -388,10 +390,10 @@ type perMetricSeriesLimitReachedError struct {
 }
 
 // newPerMetricSeriesLimitReachedError creates a new perMetricMetadataLimitReachedError indicating that a per-metric series limit has been reached.
-func newPerMetricSeriesLimitReachedError(limit int, labels labels.Labels) perMetricSeriesLimitReachedError {
+func newPerMetricSeriesLimitReachedError(limit int, labels []mimirpb.LabelAdapter) perMetricSeriesLimitReachedError {
 	return perMetricSeriesLimitReachedError{
 		limit:  limit,
-		series: labels.String(),
+		series: mimirpb.FromLabelAdaptersToString(labels),
 	}
 }
 
@@ -420,24 +422,24 @@ var _ softError = perMetricSeriesLimitReachedError{}
 // perMetricMetadataLimitReachedError is an ingesterError indicating that a per-metric metadata limit has been reached.
 type perMetricMetadataLimitReachedError struct {
 	limit  int
-	series string
+	family string
 }
 
 // newPerMetricMetadataLimitReachedError creates a new perMetricMetadataLimitReachedError indicating that a per-metric metadata limit has been reached.
-func newPerMetricMetadataLimitReachedError(limit int, labels labels.Labels) perMetricMetadataLimitReachedError {
+func newPerMetricMetadataLimitReachedError(limit int, family string) perMetricMetadataLimitReachedError {
 	return perMetricMetadataLimitReachedError{
 		limit:  limit,
-		series: labels.String(),
+		family: family,
 	}
 }
 
 func (e perMetricMetadataLimitReachedError) Error() string {
-	return fmt.Sprintf("%s This is for series %s",
+	return fmt.Sprintf("%s This is for metric %s",
 		globalerror.MaxMetadataPerMetric.MessageWithPerTenantLimitConfig(
 			fmt.Sprintf("per-metric metadata limit of %d exceeded", e.limit),
 			validation.MaxMetadataPerMetricFlag,
 		),
-		e.series,
+		e.family,
 	)
 }
 
@@ -515,7 +517,7 @@ var _ ingesterError = tsdbUnavailableError{}
 type ingesterTooBusyError struct{}
 
 func (e ingesterTooBusyError) Error() string {
-	return tooBusyErrorMsg
+	return ingesterTooBusyMsg
 }
 
 func (e ingesterTooBusyError) errorCause() mimirpb.ErrorCause {
@@ -524,6 +526,19 @@ func (e ingesterTooBusyError) errorCause() mimirpb.ErrorCause {
 
 // Ensure that ingesterTooBusyError is an ingesterError.
 var _ ingesterError = ingesterTooBusyError{}
+
+type ingesterPushGrpcDisabledError struct{}
+
+func (e ingesterPushGrpcDisabledError) Error() string {
+	return ingesterPushGrpcDisabledMsg
+}
+
+func (e ingesterPushGrpcDisabledError) errorCause() mimirpb.ErrorCause {
+	return mimirpb.METHOD_NOT_ALLOWED
+}
+
+// Ensure that ingesterPushGrpcDisabledError is an ingesterError.
+var _ ingesterError = ingesterPushGrpcDisabledError{}
 
 type ingesterErrSamplers struct {
 	sampleTimestampTooOld             *log.Sampler
@@ -569,6 +584,8 @@ func mapPushErrorToErrorWithStatus(err error) error {
 			wrappedErr = middleware.DoNotLogError{Err: err}
 		case mimirpb.TSDB_UNAVAILABLE:
 			errCode = codes.Internal
+		case mimirpb.METHOD_NOT_ALLOWED:
+			errCode = codes.Unimplemented
 		}
 	}
 	return newErrorWithStatus(wrappedErr, errCode)
@@ -588,6 +605,8 @@ func mapPushErrorToErrorWithHTTPOrGRPCStatus(err error) error {
 			return newErrorWithStatus(middleware.DoNotLogError{Err: err}, codes.Unavailable)
 		case mimirpb.TSDB_UNAVAILABLE:
 			return newErrorWithHTTPStatus(err, http.StatusServiceUnavailable)
+		case mimirpb.METHOD_NOT_ALLOWED:
+			return newErrorWithStatus(err, codes.Unimplemented)
 		}
 	}
 	return err
@@ -605,6 +624,8 @@ func mapReadErrorToErrorWithStatus(err error) error {
 			errCode = codes.ResourceExhausted
 		case mimirpb.SERVICE_UNAVAILABLE:
 			errCode = codes.Unavailable
+		case mimirpb.METHOD_NOT_ALLOWED:
+			return newErrorWithStatus(err, codes.Unimplemented)
 		}
 	}
 	return newErrorWithStatus(err, errCode)
@@ -622,6 +643,8 @@ func mapReadErrorToErrorWithHTTPOrGRPCStatus(err error) error {
 			return newErrorWithHTTPStatus(err, http.StatusServiceUnavailable)
 		case mimirpb.SERVICE_UNAVAILABLE:
 			return newErrorWithStatus(err, codes.Unavailable)
+		case mimirpb.METHOD_NOT_ALLOWED:
+			return newErrorWithStatus(err, codes.Unimplemented)
 		}
 	}
 	return err

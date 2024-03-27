@@ -173,7 +173,7 @@ func TestMimir(t *testing.T) {
 			target: []string{All, AlertManager},
 			expectedEnabledModules: []string{
 				// Check random modules that we expect to be configured when using Target=All.
-				Server, IngesterService, Ring, DistributorService, Compactor,
+				Server, IngesterService, IngesterRing, DistributorService, Compactor,
 
 				// Check that Alertmanager is configured which is not part of Target=All.
 				AlertManager,
@@ -415,6 +415,46 @@ func TestConfigValidation(t *testing.T) {
 				cfg := newDefaultConfig()
 				_ = cfg.Target.Set("all,alertmanager")
 				cfg.Querier.EngineConfig.Timeout = cfg.Server.HTTPServerWriteTimeout + time.Second
+
+				return cfg
+			},
+			expectAnyError: true,
+		},
+		{
+			name: "should pass if grpc errors are disabled, and the distributor is running with ingest storage",
+			getTestConfig: func() *Config {
+				cfg := newDefaultConfig()
+				_ = cfg.Target.Set("distributor")
+				cfg.IngestStorage.Enabled = true
+				cfg.IngestStorage.KafkaConfig.Address = "localhost:123"
+				cfg.IngestStorage.KafkaConfig.Topic = "topic"
+				cfg.Ingester.DeprecatedReturnOnlyGRPCErrors = false
+
+				return cfg
+			},
+			expectAnyError: false,
+		},
+		{
+			name: "should fails if grpc errors are disabled, and the ingester is running with ingest storage",
+			getTestConfig: func() *Config {
+				cfg := newDefaultConfig()
+				_ = cfg.Target.Set("ingester")
+				cfg.IngestStorage.Enabled = true
+				cfg.IngestStorage.KafkaConfig.Address = "localhost:123"
+				cfg.IngestStorage.KafkaConfig.Topic = "topic"
+				cfg.Ingester.DeprecatedReturnOnlyGRPCErrors = false
+
+				return cfg
+			},
+			expectAnyError: true,
+		},
+		{
+			name: "should fails if push api disabled in ingester, and the ingester isn't running with ingest storage",
+			getTestConfig: func() *Config {
+				cfg := newDefaultConfig()
+				_ = cfg.Target.Set("ingester")
+				cfg.Ingester.PushGrpcMethodEnabled = false
+				cfg.IngestStorage.Enabled = false
 
 				return cfg
 			},

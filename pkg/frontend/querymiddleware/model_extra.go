@@ -16,9 +16,9 @@ import (
 
 	jsoniter "github.com/json-iterator/go"
 	"github.com/opentracing/opentracing-go"
-	otlog "github.com/opentracing/opentracing-go/log"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/timestamp"
+	v1 "github.com/prometheus/prometheus/web/api/v1"
 
 	"github.com/grafana/mimir/pkg/mimirpb"
 )
@@ -43,14 +43,14 @@ func newEmptyPrometheusResponse() *PrometheusResponse {
 }
 
 // WithID clones the current `PrometheusRangeQueryRequest` with the provided ID.
-func (q *PrometheusRangeQueryRequest) WithID(id int64) Request {
+func (q *PrometheusRangeQueryRequest) WithID(id int64) MetricsQueryRequest {
 	newRequest := *q
 	newRequest.Id = id
 	return &newRequest
 }
 
 // WithStartEnd clones the current `PrometheusRangeQueryRequest` with a new `start` and `end` timestamp.
-func (q *PrometheusRangeQueryRequest) WithStartEnd(start int64, end int64) Request {
+func (q *PrometheusRangeQueryRequest) WithStartEnd(start int64, end int64) MetricsQueryRequest {
 	newRequest := *q
 	newRequest.Start = start
 	newRequest.End = end
@@ -58,7 +58,7 @@ func (q *PrometheusRangeQueryRequest) WithStartEnd(start int64, end int64) Reque
 }
 
 // WithQuery clones the current `PrometheusRangeQueryRequest` with a new query.
-func (q *PrometheusRangeQueryRequest) WithQuery(query string) Request {
+func (q *PrometheusRangeQueryRequest) WithQuery(query string) MetricsQueryRequest {
 	newRequest := *q
 	newRequest.Query = query
 	return &newRequest
@@ -66,7 +66,7 @@ func (q *PrometheusRangeQueryRequest) WithQuery(query string) Request {
 
 // WithTotalQueriesHint clones the current `PrometheusRangeQueryRequest` with an
 // added Hint value for TotalQueries.
-func (q *PrometheusRangeQueryRequest) WithTotalQueriesHint(totalQueries int32) Request {
+func (q *PrometheusRangeQueryRequest) WithTotalQueriesHint(totalQueries int32) MetricsQueryRequest {
 	newRequest := *q
 	if newRequest.Hints == nil {
 		newRequest.Hints = &Hints{TotalQueries: totalQueries}
@@ -79,7 +79,7 @@ func (q *PrometheusRangeQueryRequest) WithTotalQueriesHint(totalQueries int32) R
 
 // WithEstimatedSeriesCountHint clones the current `PrometheusRangeQueryRequest`
 // with an added Hint value for EstimatedCardinality.
-func (q *PrometheusRangeQueryRequest) WithEstimatedSeriesCountHint(count uint64) Request {
+func (q *PrometheusRangeQueryRequest) WithEstimatedSeriesCountHint(count uint64) MetricsQueryRequest {
 	newRequest := *q
 	if newRequest.Hints == nil {
 		newRequest.Hints = &Hints{
@@ -92,14 +92,13 @@ func (q *PrometheusRangeQueryRequest) WithEstimatedSeriesCountHint(count uint64)
 	return &newRequest
 }
 
-// LogToSpan logs the current `PrometheusRangeQueryRequest` parameters to the specified span.
-func (q *PrometheusRangeQueryRequest) LogToSpan(sp opentracing.Span) {
-	sp.LogFields(
-		otlog.String("query", q.GetQuery()),
-		otlog.String("start", timestamp.Time(q.GetStart()).String()),
-		otlog.String("end", timestamp.Time(q.GetEnd()).String()),
-		otlog.Int64("step (ms)", q.GetStep()),
-	)
+// AddSpanTags writes the current `PrometheusRangeQueryRequest` parameters to the specified span tags
+// ("attributes" in OpenTelemetry parlance).
+func (q *PrometheusRangeQueryRequest) AddSpanTags(sp opentracing.Span) {
+	sp.SetTag("query", q.GetQuery())
+	sp.SetTag("start", timestamp.Time(q.GetStart()).String())
+	sp.SetTag("end", timestamp.Time(q.GetEnd()).String())
+	sp.SetTag("step_ms", q.GetStep())
 }
 
 func (r *PrometheusInstantQueryRequest) GetStart() int64 {
@@ -114,25 +113,25 @@ func (r *PrometheusInstantQueryRequest) GetStep() int64 {
 	return 0
 }
 
-func (r *PrometheusInstantQueryRequest) WithID(id int64) Request {
+func (r *PrometheusInstantQueryRequest) WithID(id int64) MetricsQueryRequest {
 	newRequest := *r
 	newRequest.Id = id
 	return &newRequest
 }
 
-func (r *PrometheusInstantQueryRequest) WithStartEnd(startTime int64, _ int64) Request {
+func (r *PrometheusInstantQueryRequest) WithStartEnd(startTime int64, _ int64) MetricsQueryRequest {
 	newRequest := *r
 	newRequest.Time = startTime
 	return &newRequest
 }
 
-func (r *PrometheusInstantQueryRequest) WithQuery(s string) Request {
+func (r *PrometheusInstantQueryRequest) WithQuery(s string) MetricsQueryRequest {
 	newRequest := *r
 	newRequest.Query = s
 	return &newRequest
 }
 
-func (r *PrometheusInstantQueryRequest) WithTotalQueriesHint(totalQueries int32) Request {
+func (r *PrometheusInstantQueryRequest) WithTotalQueriesHint(totalQueries int32) MetricsQueryRequest {
 	newRequest := *r
 	if newRequest.Hints == nil {
 		newRequest.Hints = &Hints{TotalQueries: totalQueries}
@@ -143,7 +142,7 @@ func (r *PrometheusInstantQueryRequest) WithTotalQueriesHint(totalQueries int32)
 	return &newRequest
 }
 
-func (r *PrometheusInstantQueryRequest) WithEstimatedSeriesCountHint(count uint64) Request {
+func (r *PrometheusInstantQueryRequest) WithEstimatedSeriesCountHint(count uint64) MetricsQueryRequest {
 	newRequest := *r
 	if newRequest.Hints == nil {
 		newRequest.Hints = &Hints{
@@ -156,11 +155,60 @@ func (r *PrometheusInstantQueryRequest) WithEstimatedSeriesCountHint(count uint6
 	return &newRequest
 }
 
-func (r *PrometheusInstantQueryRequest) LogToSpan(sp opentracing.Span) {
-	sp.LogFields(
-		otlog.String("query", r.GetQuery()),
-		otlog.String("time", timestamp.Time(r.GetTime()).String()),
-	)
+// AddSpanTags writes query information about the current `PrometheusInstantQueryRequest`
+// to a span's tag ("attributes" in OpenTelemetry parlance).
+func (r *PrometheusInstantQueryRequest) AddSpanTags(sp opentracing.Span) {
+	sp.SetTag("query", r.GetQuery())
+	sp.SetTag("time", timestamp.Time(r.GetTime()).String())
+}
+
+func (r *PrometheusLabelNamesQueryRequest) GetLabelName() string {
+	return ""
+}
+
+func (r *PrometheusLabelNamesQueryRequest) GetStartOrDefault() int64 {
+	if r.GetStart() == 0 {
+		return v1.MinTime.UnixMilli()
+	}
+	return r.GetStart()
+}
+
+func (r *PrometheusLabelNamesQueryRequest) GetEndOrDefault() int64 {
+	if r.GetEnd() == 0 {
+		return v1.MaxTime.UnixMilli()
+	}
+	return r.GetEnd()
+}
+
+func (r *PrometheusLabelValuesQueryRequest) GetStartOrDefault() int64 {
+	if r.GetStart() == 0 {
+		return v1.MinTime.UnixMilli()
+	}
+	return r.GetStart()
+}
+
+func (r *PrometheusLabelValuesQueryRequest) GetEndOrDefault() int64 {
+	if r.GetEnd() == 0 {
+		return v1.MaxTime.UnixMilli()
+	}
+	return r.GetEnd()
+}
+
+// AddSpanTags writes query information about the current `PrometheusLabelNamesQueryRequest`
+// to a span's tag ("attributes" in OpenTelemetry parlance).
+func (r *PrometheusLabelNamesQueryRequest) AddSpanTags(sp opentracing.Span) {
+	sp.SetTag("matchers", fmt.Sprintf("%v", r.GetLabelMatcherSets()))
+	sp.SetTag("start", timestamp.Time(r.GetStart()).String())
+	sp.SetTag("end", timestamp.Time(r.GetEnd()).String())
+}
+
+// AddSpanTags writes query information about the current `PrometheusLabelNamesQueryRequest`
+// to a span's tag ("attributes" in OpenTelemetry parlance).
+func (r *PrometheusLabelValuesQueryRequest) AddSpanTags(sp opentracing.Span) {
+	sp.SetTag("label", fmt.Sprintf("%v", r.GetLabelName()))
+	sp.SetTag("matchers", fmt.Sprintf("%v", r.GetLabelMatcherSets()))
+	sp.SetTag("start", timestamp.Time(r.GetStart()).String())
+	sp.SetTag("end", timestamp.Time(r.GetEnd()).String())
 }
 
 func (d *PrometheusData) UnmarshalJSON(b []byte) error {
