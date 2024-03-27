@@ -76,9 +76,9 @@ func queryFromGeneratorURL(generatorURL string) (string, error) {
 	return query, nil
 }
 
-// WithCustomFunctions returns template.Option which adds additional template functions
+// withCustomFunctions returns template.Option which adds additional template functions
 // to the default ones.
-func WithCustomFunctions(userID string) template.Option {
+func withCustomFunctions(userID string) template.Option {
 	funcs := tmpltext.FuncMap{
 		"tenantID":              func() string { return userID },
 		"grafanaExploreURL":     grafanaExploreURL,

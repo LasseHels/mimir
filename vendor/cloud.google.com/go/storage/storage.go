@@ -146,10 +146,8 @@ func NewClient(ctx context.Context, opts ...option.ClientOption) (*Client, error
 		// Prepend default options to avoid overriding options passed by the user.
 		opts = append([]option.ClientOption{option.WithScopes(ScopeFullControl, "https://www.googleapis.com/auth/cloud-platform"), option.WithUserAgent(userAgent)}, opts...)
 
-		opts = append(opts, internaloption.WithDefaultEndpointTemplate("https://storage.UNIVERSE_DOMAIN/storage/v1/"),
-			internaloption.WithDefaultMTLSEndpoint("https://storage.mtls.googleapis.com/storage/v1/"),
-			internaloption.WithDefaultUniverseDomain("googleapis.com"),
-		)
+		opts = append(opts, internaloption.WithDefaultEndpoint("https://storage.googleapis.com/storage/v1/"))
+		opts = append(opts, internaloption.WithDefaultMTLSEndpoint("https://storage.mtls.googleapis.com/storage/v1/"))
 
 		// Don't error out here. The user may have passed in their own HTTP
 		// client which does not auth with ADC or other common conventions.
@@ -219,8 +217,6 @@ func NewClient(ctx context.Context, opts ...option.ClientOption) (*Client, error
 // NewGRPCClient creates a new Storage client using the gRPC transport and API.
 // Client methods which have not been implemented in gRPC will return an error.
 // In particular, methods for Cloud Pub/Sub notifications are not supported.
-// Using a non-default universe domain is also not supported with the Storage
-// gRPC client.
 //
 // The storage gRPC API is still in preview and not yet publicly available.
 // If you would like to use the API, please first contact your GCP account rep to
@@ -303,11 +299,7 @@ func (s pathStyle) host(hostname, bucket string) string {
 	return "storage.googleapis.com"
 }
 
-func (s virtualHostedStyle) host(hostname, bucket string) string {
-	if hostname != "" {
-		return bucket + "." + stripScheme(hostname)
-	}
-
+func (s virtualHostedStyle) host(_, bucket string) string {
 	if host := os.Getenv("STORAGE_EMULATOR_HOST"); host != "" {
 		return bucket + "." + stripScheme(host)
 	}
@@ -463,7 +455,7 @@ type SignedURLOptions struct {
 
 	// Hostname sets the host of the signed URL. This field overrides any
 	// endpoint set on a storage Client or through STORAGE_EMULATOR_HOST.
-	// Only compatible with PathStyle and VirtualHostedStyle URLStyles.
+	// Only compatible with PathStyle URLStyle.
 	// Optional.
 	Hostname string
 }
@@ -751,7 +743,7 @@ func signedURLV4(bucket, name string, opts *SignedURLOptions, now time.Time) (st
 	}
 
 	var headersWithValue []string
-	headersWithValue = append(headersWithValue, "host:"+u.Hostname())
+	headersWithValue = append(headersWithValue, "host:"+u.Host)
 	headersWithValue = append(headersWithValue, opts.Headers...)
 	if opts.ContentType != "" {
 		headersWithValue = append(headersWithValue, "content-type:"+opts.ContentType)
@@ -887,17 +879,16 @@ func signedURLV2(bucket, name string, opts *SignedURLOptions) (string, error) {
 // ObjectHandle provides operations on an object in a Google Cloud Storage bucket.
 // Use BucketHandle.Object to get a handle.
 type ObjectHandle struct {
-	c                 *Client
-	bucket            string
-	object            string
-	acl               ACLHandle
-	gen               int64 // a negative value indicates latest
-	conds             *Conditions
-	encryptionKey     []byte // AES-256 key
-	userProject       string // for requester-pays buckets
-	readCompressed    bool   // Accept-Encoding: gzip
-	retry             *retryConfig
-	overrideRetention *bool
+	c              *Client
+	bucket         string
+	object         string
+	acl            ACLHandle
+	gen            int64 // a negative value indicates latest
+	conds          *Conditions
+	encryptionKey  []byte // AES-256 key
+	userProject    string // for requester-pays buckets
+	readCompressed bool   // Accept-Encoding: gzip
+	retry          *retryConfig
 }
 
 // ACL provides access to the object's access control list.
@@ -967,15 +958,7 @@ func (o *ObjectHandle) Update(ctx context.Context, uattrs ObjectAttrsToUpdate) (
 	}
 	isIdempotent := o.conds != nil && o.conds.MetagenerationMatch != 0
 	opts := makeStorageOpts(isIdempotent, o.retry, o.userProject)
-	return o.c.tc.UpdateObject(ctx,
-		&updateObjectParams{
-			bucket:            o.bucket,
-			object:            o.object,
-			uattrs:            &uattrs,
-			gen:               o.gen,
-			encryptionKey:     o.encryptionKey,
-			conds:             o.conds,
-			overrideRetention: o.overrideRetention}, opts...)
+	return o.c.tc.UpdateObject(ctx, o.bucket, o.object, &uattrs, o.gen, o.encryptionKey, o.conds, opts...)
 }
 
 // BucketName returns the name of the bucket.
@@ -990,19 +973,16 @@ func (o *ObjectHandle) ObjectName() string {
 
 // ObjectAttrsToUpdate is used to update the attributes of an object.
 // Only fields set to non-nil values will be updated.
-// For all fields except CustomTime and Retention, set the field to its zero
-// value to delete it. CustomTime cannot be deleted or changed to an earlier
-// time once set. Retention can be deleted (only if the Mode is Unlocked) by
-// setting it to an empty value (not nil).
+// For all fields except CustomTime, set the field to its zero value to delete
+// it. CustomTime cannot be deleted or changed to an earlier time once set.
 //
-// For example, to change ContentType and delete ContentEncoding, Metadata and
-// Retention, use:
+// For example, to change ContentType and delete ContentEncoding and
+// Metadata, use
 //
 //	ObjectAttrsToUpdate{
 //	    ContentType: "text/html",
 //	    ContentEncoding: "",
 //	    Metadata: map[string]string{},
-//	    Retention: &ObjectRetention{},
 //	}
 type ObjectAttrsToUpdate struct {
 	EventBasedHold     optional.Bool
@@ -1019,12 +999,6 @@ type ObjectAttrsToUpdate struct {
 	// If not empty, applies a predefined set of access controls. ACL must be nil.
 	// See https://cloud.google.com/storage/docs/json_api/v1/objects/patch.
 	PredefinedACL string
-
-	// Retention contains the retention configuration for this object.
-	// Operations other than setting the retention for the first time or
-	// extending the RetainUntil time on the object retention must be done
-	// on an ObjectHandle with OverrideUnlockedRetention set to true.
-	Retention *ObjectRetention
 }
 
 // Delete deletes the single specified object.
@@ -1043,17 +1017,6 @@ func (o *ObjectHandle) Delete(ctx context.Context) error {
 func (o *ObjectHandle) ReadCompressed(compressed bool) *ObjectHandle {
 	o2 := *o
 	o2.readCompressed = compressed
-	return &o2
-}
-
-// OverrideUnlockedRetention provides an option for overriding an Unlocked
-// Retention policy. This must be set to true in order to change a policy
-// from Unlocked to Locked, to set it to null, or to reduce its
-// RetainUntil attribute. It is not required for setting the ObjectRetention for
-// the first time nor for extending the RetainUntil time.
-func (o *ObjectHandle) OverrideUnlockedRetention(override bool) *ObjectHandle {
-	o2 := *o
-	o2.overrideRetention = &override
 	return &o2
 }
 
@@ -1146,7 +1109,6 @@ func (o *ObjectAttrs) toRawObject(bucket string) *raw.Object {
 		Acl:                     toRawObjectACL(o.ACL),
 		Metadata:                o.Metadata,
 		CustomTime:              ct,
-		Retention:               o.Retention.toRawObjectRetention(),
 	}
 }
 
@@ -1382,42 +1344,6 @@ type ObjectAttrs struct {
 	// For non-composite objects, the value will be zero.
 	// This field is read-only.
 	ComponentCount int64
-
-	// Retention contains the retention configuration for this object.
-	// ObjectRetention cannot be configured or reported through the gRPC API.
-	Retention *ObjectRetention
-}
-
-// ObjectRetention contains the retention configuration for this object.
-type ObjectRetention struct {
-	// Mode is the retention policy's mode on this object. Valid values are
-	// "Locked" and "Unlocked".
-	// Locked retention policies cannot be changed. Unlocked policies require an
-	// override to change.
-	Mode string
-
-	// RetainUntil is the time this object will be retained until.
-	RetainUntil time.Time
-}
-
-func (r *ObjectRetention) toRawObjectRetention() *raw.ObjectRetention {
-	if r == nil {
-		return nil
-	}
-	return &raw.ObjectRetention{
-		Mode:            r.Mode,
-		RetainUntilTime: r.RetainUntil.Format(time.RFC3339),
-	}
-}
-
-func toObjectRetention(r *raw.ObjectRetention) *ObjectRetention {
-	if r == nil {
-		return nil
-	}
-	return &ObjectRetention{
-		Mode:        r.Mode,
-		RetainUntil: convertTime(r.RetainUntilTime),
-	}
 }
 
 // convertTime converts a time in RFC3339 format to time.Time.
@@ -1489,7 +1415,6 @@ func newObject(o *raw.Object) *ObjectAttrs {
 		Etag:                    o.Etag,
 		CustomTime:              convertTime(o.CustomTime),
 		ComponentCount:          o.ComponentCount,
-		Retention:               toObjectRetention(o.Retention),
 	}
 }
 
@@ -1628,11 +1553,6 @@ type Query struct {
 	// for syntax details. When Delimiter is set in conjunction with MatchGlob,
 	// it must be set to /.
 	MatchGlob string
-
-	// IncludeFoldersAsPrefixes includes Folders and Managed Folders in the set of
-	// prefixes returned by the query. Only applicable if Delimiter is set to /.
-	// IncludeFoldersAsPrefixes is not yet implemented in the gRPC API.
-	IncludeFoldersAsPrefixes bool
 }
 
 // attrToFieldMap maps the field names of ObjectAttrs to the underlying field
@@ -1667,7 +1587,6 @@ var attrToFieldMap = map[string]string{
 	"Etag":                    "etag",
 	"CustomTime":              "customTime",
 	"ComponentCount":          "componentCount",
-	"Retention":               "retention",
 }
 
 // attrToProtoFieldMap maps the field names of ObjectAttrs to the underlying field
@@ -1702,7 +1621,6 @@ var attrToProtoFieldMap = map[string]string{
 	"ComponentCount":          "component_count",
 	// MediaLink was explicitly excluded from the proto as it is an HTTP-ism.
 	// "MediaLink":               "mediaLink",
-	// TODO: add object retention - b/308194853
 }
 
 // SetAttrSelection makes the query populate only specific attributes of
@@ -1888,7 +1806,7 @@ func (c *Conditions) isMetagenerationValid() bool {
 func applyConds(method string, gen int64, conds *Conditions, call interface{}) error {
 	cval := reflect.ValueOf(call)
 	if gen >= 0 {
-		if !setGeneration(cval, gen) {
+		if !setConditionField(cval, "Generation", gen) {
 			return fmt.Errorf("storage: %s: generation not supported", method)
 		}
 	}
@@ -1900,25 +1818,25 @@ func applyConds(method string, gen int64, conds *Conditions, call interface{}) e
 	}
 	switch {
 	case conds.GenerationMatch != 0:
-		if !setIfGenerationMatch(cval, conds.GenerationMatch) {
+		if !setConditionField(cval, "IfGenerationMatch", conds.GenerationMatch) {
 			return fmt.Errorf("storage: %s: ifGenerationMatch not supported", method)
 		}
 	case conds.GenerationNotMatch != 0:
-		if !setIfGenerationNotMatch(cval, conds.GenerationNotMatch) {
+		if !setConditionField(cval, "IfGenerationNotMatch", conds.GenerationNotMatch) {
 			return fmt.Errorf("storage: %s: ifGenerationNotMatch not supported", method)
 		}
 	case conds.DoesNotExist:
-		if !setIfGenerationMatch(cval, int64(0)) {
+		if !setConditionField(cval, "IfGenerationMatch", int64(0)) {
 			return fmt.Errorf("storage: %s: DoesNotExist not supported", method)
 		}
 	}
 	switch {
 	case conds.MetagenerationMatch != 0:
-		if !setIfMetagenerationMatch(cval, conds.MetagenerationMatch) {
+		if !setConditionField(cval, "IfMetagenerationMatch", conds.MetagenerationMatch) {
 			return fmt.Errorf("storage: %s: ifMetagenerationMatch not supported", method)
 		}
 	case conds.MetagenerationNotMatch != 0:
-		if !setIfMetagenerationNotMatch(cval, conds.MetagenerationNotMatch) {
+		if !setConditionField(cval, "IfMetagenerationNotMatch", conds.MetagenerationNotMatch) {
 			return fmt.Errorf("storage: %s: ifMetagenerationNotMatch not supported", method)
 		}
 	}
@@ -1979,45 +1897,16 @@ func applySourceCondsProto(gen int64, conds *Conditions, call *storagepb.Rewrite
 	return nil
 }
 
-// setGeneration sets Generation on a *raw.WhateverCall.
+// setConditionField sets a field on a *raw.WhateverCall.
 // We can't use anonymous interfaces because the return type is
 // different, since the field setters are builders.
-// We also make sure to supply a compile-time constant to MethodByName;
-// otherwise, the Go Linker will disable dead code elimination, leading
-// to larger binaries for all packages that import storage.
-func setGeneration(cval reflect.Value, value interface{}) bool {
-	return setCondition(cval.MethodByName("Generation"), value)
-}
-
-// setIfGenerationMatch sets IfGenerationMatch on a *raw.WhateverCall.
-// See also setGeneration.
-func setIfGenerationMatch(cval reflect.Value, value interface{}) bool {
-	return setCondition(cval.MethodByName("IfGenerationMatch"), value)
-}
-
-// setIfGenerationNotMatch sets IfGenerationNotMatch on a *raw.WhateverCall.
-// See also setGeneration.
-func setIfGenerationNotMatch(cval reflect.Value, value interface{}) bool {
-	return setCondition(cval.MethodByName("IfGenerationNotMatch"), value)
-}
-
-// setIfMetagenerationMatch sets IfMetagenerationMatch on a *raw.WhateverCall.
-// See also setGeneration.
-func setIfMetagenerationMatch(cval reflect.Value, value interface{}) bool {
-	return setCondition(cval.MethodByName("IfMetagenerationMatch"), value)
-}
-
-// setIfMetagenerationNotMatch sets IfMetagenerationNotMatch on a *raw.WhateverCall.
-// See also setGeneration.
-func setIfMetagenerationNotMatch(cval reflect.Value, value interface{}) bool {
-	return setCondition(cval.MethodByName("IfMetagenerationNotMatch"), value)
-}
-
-func setCondition(setter reflect.Value, value interface{}) bool {
-	if setter.IsValid() {
-		setter.Call([]reflect.Value{reflect.ValueOf(value)})
+func setConditionField(call reflect.Value, name string, value interface{}) bool {
+	m := call.MethodByName(name)
+	if !m.IsValid() {
+		return false
 	}
-	return setter.IsValid()
+	m.Call([]reflect.Value{reflect.ValueOf(value)})
+	return true
 }
 
 // Retryer returns an object handle that is configured with custom retry
@@ -2087,26 +1976,6 @@ type withBackoff struct {
 
 func (wb *withBackoff) apply(config *retryConfig) {
 	config.backoff = &wb.backoff
-}
-
-// WithMaxAttempts configures the maximum number of times an API call can be made
-// in the case of retryable errors.
-// For example, if you set WithMaxAttempts(5), the operation will be attempted up to 5
-// times total (initial call plus 4 retries).
-// Without this setting, operations will continue retrying indefinitely
-// until either the context is canceled or a deadline is reached.
-func WithMaxAttempts(maxAttempts int) RetryOption {
-	return &withMaxAttempts{
-		maxAttempts: maxAttempts,
-	}
-}
-
-type withMaxAttempts struct {
-	maxAttempts int
-}
-
-func (wb *withMaxAttempts) apply(config *retryConfig) {
-	config.maxAttempts = &wb.maxAttempts
 }
 
 // RetryPolicy describes the available policies for which operations should be
@@ -2181,7 +2050,6 @@ type retryConfig struct {
 	backoff     *gax.Backoff
 	policy      RetryPolicy
 	shouldRetry func(err error) bool
-	maxAttempts *int
 }
 
 func (r *retryConfig) clone() *retryConfig {
@@ -2202,7 +2070,6 @@ func (r *retryConfig) clone() *retryConfig {
 		backoff:     bo,
 		policy:      r.policy,
 		shouldRetry: r.shouldRetry,
-		maxAttempts: r.maxAttempts,
 	}
 }
 

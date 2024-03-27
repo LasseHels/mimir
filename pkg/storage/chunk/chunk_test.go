@@ -131,11 +131,6 @@ func testChunkEncoding(t *testing.T, encoding Encoding, samples int) {
 
 	// Check all the samples are in there.
 	iter := chunk.NewIterator(nil)
-	var (
-		h  *histogram.Histogram
-		fh *histogram.FloatHistogram
-		ts int64
-	)
 	for i := 0; i < samples; i++ {
 		switch encoding {
 		case PrometheusXorChunk:
@@ -145,14 +140,14 @@ func testChunkEncoding(t *testing.T, encoding Encoding, samples int) {
 			require.EqualValues(t, model.SampleValue(i), sample.Value)
 		case PrometheusHistogramChunk:
 			require.Equal(t, chunkenc.ValHistogram, iter.Scan())
-			ts, h = iter.AtHistogram(h)
+			ts, h := iter.AtHistogram()
 			require.EqualValues(t, model.Time(i*step), ts)
 			require.EqualValues(t, expectedHistogram(i), h)
 		case PrometheusFloatHistogramChunk:
 			require.Equal(t, chunkenc.ValFloatHistogram, iter.Scan())
-			ts, fh = iter.AtFloatHistogram(fh)
+			ts, h := iter.AtFloatHistogram()
 			require.EqualValues(t, model.Time(i*step), ts)
-			require.EqualValues(t, expectedFloatHistogram(i), fh)
+			require.EqualValues(t, expectedFloatHistogram(i), h)
 		default:
 			require.FailNowf(t, "Unexpected encoding", "%v", encoding)
 		}
@@ -183,11 +178,6 @@ func testChunkSeek(t *testing.T, encoding Encoding, samples int) {
 
 	iter := chunk.NewIterator(nil)
 	for i := 0; i < samples; i += samples / 10 {
-		var (
-			h  *histogram.Histogram
-			fh *histogram.FloatHistogram
-			ts int64
-		)
 		if i > 0 {
 			// Seek one millisecond before the actual time
 			require.NotEqual(t, chunkenc.ValNone, iter.FindAtOrAfter(model.Time(i*step-1)), "1ms before step %d not found", i)
@@ -197,13 +187,13 @@ func testChunkSeek(t *testing.T, encoding Encoding, samples int) {
 				require.EqualValues(t, model.Time(i*step), sample.Timestamp)
 				require.EqualValues(t, model.SampleValue(i), sample.Value)
 			case PrometheusHistogramChunk:
-				ts, h = iter.AtHistogram(h)
+				ts, h := iter.AtHistogram()
 				require.EqualValues(t, model.Time(i*step), ts)
 				require.EqualValues(t, expectedHistogram(i), h)
 			case PrometheusFloatHistogramChunk:
-				ts, fh = iter.AtFloatHistogram(fh)
+				ts, h := iter.AtFloatHistogram()
 				require.EqualValues(t, model.Time(i*step), ts)
-				require.EqualValues(t, expectedFloatHistogram(i), fh)
+				require.EqualValues(t, expectedFloatHistogram(i), h)
 			default:
 				require.FailNowf(t, "Unexpected encoding", "%v", encoding)
 			}
@@ -216,13 +206,13 @@ func testChunkSeek(t *testing.T, encoding Encoding, samples int) {
 			require.EqualValues(t, model.Time(i*step), sample.Timestamp)
 			require.EqualValues(t, model.SampleValue(i), sample.Value)
 		case PrometheusHistogramChunk:
-			ts, h = iter.AtHistogram(h)
+			ts, h := iter.AtHistogram()
 			require.EqualValues(t, model.Time(i*step), ts)
 			require.EqualValues(t, expectedHistogram(i), h)
 		case PrometheusFloatHistogramChunk:
-			ts, fh = iter.AtFloatHistogram(fh)
+			ts, h := iter.AtFloatHistogram()
 			require.EqualValues(t, model.Time(i*step), ts)
-			require.EqualValues(t, expectedFloatHistogram(i), fh)
+			require.EqualValues(t, expectedFloatHistogram(i), h)
 		default:
 			require.FailNowf(t, "Unexpected encoding", "%v", encoding)
 		}
@@ -236,13 +226,13 @@ func testChunkSeek(t *testing.T, encoding Encoding, samples int) {
 				require.EqualValues(t, model.Time(j*step), sample.Timestamp)
 				require.EqualValues(t, model.SampleValue(j), sample.Value)
 			case PrometheusHistogramChunk:
-				ts, h = iter.AtHistogram(h)
+				ts, h := iter.AtHistogram()
 				require.EqualValues(t, model.Time(j*step), ts)
 				require.EqualValues(t, expectedHistogram(j), h)
 			case PrometheusFloatHistogramChunk:
-				ts, fh = iter.AtFloatHistogram(fh)
+				ts, h := iter.AtFloatHistogram()
 				require.EqualValues(t, model.Time(j*step), ts)
-				require.EqualValues(t, expectedFloatHistogram(j), fh)
+				require.EqualValues(t, expectedFloatHistogram(j), h)
 			default:
 				require.FailNowf(t, "Unexpected encoding", "%v", encoding)
 			}
@@ -258,11 +248,6 @@ func testChunkSeekForward(t *testing.T, encoding Encoding, samples int) {
 	chunk := mkChunk(t, encoding, samples)
 
 	iter := chunk.NewIterator(nil)
-	var (
-		h  *histogram.Histogram
-		fh *histogram.FloatHistogram
-		ts int64
-	)
 	for i := 0; i < samples; i += samples / 10 {
 		require.NotEqual(t, chunkenc.ValNone, iter.FindAtOrAfter(model.Time(i*step)))
 		switch encoding {
@@ -271,13 +256,13 @@ func testChunkSeekForward(t *testing.T, encoding Encoding, samples int) {
 			require.EqualValues(t, model.Time(i*step), sample.Timestamp)
 			require.EqualValues(t, model.SampleValue(i), sample.Value)
 		case PrometheusHistogramChunk:
-			ts, h = iter.AtHistogram(h)
+			ts, h := iter.AtHistogram()
 			require.EqualValues(t, model.Time(i*step), ts)
 			require.EqualValues(t, expectedHistogram(i), h)
 		case PrometheusFloatHistogramChunk:
-			ts, fh = iter.AtFloatHistogram(fh)
+			ts, h := iter.AtFloatHistogram()
 			require.EqualValues(t, model.Time(i*step), ts)
-			require.EqualValues(t, expectedFloatHistogram(i), fh)
+			require.EqualValues(t, expectedFloatHistogram(i), h)
 		default:
 			require.FailNowf(t, "Unexpected encoding", "%v", encoding)
 		}
@@ -291,13 +276,13 @@ func testChunkSeekForward(t *testing.T, encoding Encoding, samples int) {
 				require.EqualValues(t, model.Time(j*step), sample.Timestamp)
 				require.EqualValues(t, model.SampleValue(j), sample.Value)
 			case PrometheusHistogramChunk:
-				ts, h = iter.AtHistogram(h)
+				ts, h := iter.AtHistogram()
 				require.EqualValues(t, model.Time(j*step), ts)
 				require.EqualValues(t, expectedHistogram(j), h)
 			case PrometheusFloatHistogramChunk:
-				ts, fh = iter.AtFloatHistogram(nil)
+				ts, h := iter.AtFloatHistogram()
 				require.EqualValues(t, model.Time(j*step), ts)
-				require.EqualValues(t, expectedFloatHistogram(j), fh)
+				require.EqualValues(t, expectedFloatHistogram(j), h)
 			default:
 				require.FailNowf(t, "Unexpected encoding", "%v", encoding)
 			}
@@ -318,7 +303,7 @@ func testChunkBatch(t *testing.T, encoding Encoding, samples int) {
 		switch encoding {
 		case PrometheusXorChunk:
 			require.Equal(t, chunkenc.ValFloat, chunkType)
-			batch = iter.Batch(BatchSize, chunkenc.ValFloat, nil, nil)
+			batch = iter.Batch(BatchSize, chunkenc.ValFloat)
 			require.Equal(t, chunkenc.ValFloat, batch.ValueType, "Batch contains floats")
 			for j := 0; j < batch.Length; j++ {
 				require.EqualValues(t, int64((i+j)*step), batch.Timestamps[j])
@@ -326,7 +311,7 @@ func testChunkBatch(t *testing.T, encoding Encoding, samples int) {
 			}
 		case PrometheusHistogramChunk:
 			require.Equal(t, chunkenc.ValHistogram, chunkType)
-			batch = iter.Batch(BatchSize, chunkenc.ValHistogram, nil, nil)
+			batch = iter.Batch(BatchSize, chunkenc.ValHistogram)
 			require.Equal(t, chunkenc.ValHistogram, batch.ValueType, "Batch contains histograms")
 			for j := 0; j < batch.Length; j++ {
 				require.EqualValues(t, int64((i+j)*step), batch.Timestamps[j])
@@ -334,7 +319,7 @@ func testChunkBatch(t *testing.T, encoding Encoding, samples int) {
 			}
 		case PrometheusFloatHistogramChunk:
 			require.Equal(t, chunkenc.ValFloatHistogram, chunkType)
-			batch = iter.Batch(BatchSize, chunkenc.ValFloatHistogram, nil, nil)
+			batch = iter.Batch(BatchSize, chunkenc.ValFloatHistogram)
 			require.Equal(t, chunkenc.ValFloatHistogram, batch.ValueType, "Batch contains float histograms")
 			for j := 0; j < batch.Length; j++ {
 				require.EqualValues(t, int64((i+j)*step), batch.Timestamps[j])

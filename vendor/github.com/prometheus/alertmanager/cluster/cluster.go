@@ -15,7 +15,6 @@ package cluster
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/rand"
 	"net"
@@ -29,6 +28,7 @@ import (
 	"github.com/go-kit/log/level"
 	"github.com/hashicorp/memberlist"
 	"github.com/oklog/ulid"
+	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -146,11 +146,11 @@ func Create(
 ) (*Peer, error) {
 	bindHost, bindPortStr, err := net.SplitHostPort(bindAddr)
 	if err != nil {
-		return nil, fmt.Errorf("invalid listen address: %w", err)
+		return nil, errors.Wrap(err, "invalid listen address")
 	}
 	bindPort, err := strconv.Atoi(bindPortStr)
 	if err != nil {
-		return nil, fmt.Errorf("address %s: invalid port: %w", bindAddr, err)
+		return nil, errors.Wrapf(err, "address %s: invalid port", bindAddr)
 	}
 
 	var advertiseHost string
@@ -159,17 +159,17 @@ func Create(
 		var advertisePortStr string
 		advertiseHost, advertisePortStr, err = net.SplitHostPort(advertiseAddr)
 		if err != nil {
-			return nil, fmt.Errorf("invalid advertise address: %w", err)
+			return nil, errors.Wrap(err, "invalid advertise address")
 		}
 		advertisePort, err = strconv.Atoi(advertisePortStr)
 		if err != nil {
-			return nil, fmt.Errorf("address %s: invalid port: %w", advertiseAddr, err)
+			return nil, errors.Wrapf(err, "address %s: invalid port", advertiseAddr)
 		}
 	}
 
 	resolvedPeers, err := resolvePeers(context.Background(), knownPeers, advertiseAddr, &net.Resolver{}, waitIfEmpty)
 	if err != nil {
-		return nil, fmt.Errorf("resolve peers: %w", err)
+		return nil, errors.Wrap(err, "resolve peers")
 	}
 	level.Debug(l).Log("msg", "resolved peers to following addresses", "peers", strings.Join(resolvedPeers, ","))
 
@@ -242,13 +242,13 @@ func Create(
 		level.Info(l).Log("msg", "using TLS for gossip")
 		cfg.Transport, err = NewTLSTransport(context.Background(), l, reg, cfg.BindAddr, cfg.BindPort, tlsTransportConfig)
 		if err != nil {
-			return nil, fmt.Errorf("tls transport: %w", err)
+			return nil, errors.Wrap(err, "tls transport")
 		}
 	}
 
 	ml, err := memberlist.Create(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("create memberlist: %w", err)
+		return nil, errors.Wrap(err, "create memberlist")
 	}
 	p.mlist = ml
 	return p, nil
@@ -736,7 +736,7 @@ func resolvePeers(ctx context.Context, peers []string, myAddress string, res *ne
 	for _, peer := range peers {
 		host, port, err := net.SplitHostPort(peer)
 		if err != nil {
-			return nil, fmt.Errorf("split host/port for peer %s: %w", peer, err)
+			return nil, errors.Wrapf(err, "split host/port for peer %s", peer)
 		}
 
 		retryCtx, cancel := context.WithCancel(ctx)
@@ -761,7 +761,7 @@ func resolvePeers(ctx context.Context, peers []string, myAddress string, res *ne
 				ips, err = res.LookupIPAddr(retryCtx, host)
 				if err != nil {
 					lookupErrSpotted = true
-					return fmt.Errorf("IP Addr lookup for peer %s: %w", peer, err)
+					return errors.Wrapf(err, "IP Addr lookup for peer %s", peer)
 				}
 
 				ips = removeMyAddr(ips, port, myAddress)

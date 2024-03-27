@@ -15,38 +15,40 @@ The currently supported services are Amazon Simple Storage Service (S3 and S3-co
 - Configurable time range (`--min-time` and `--max-time`) to only copy blocks inclusively within a provided range
 - Log what would be copied without actually copying anything with `--dry-run`
 
-## Running
+## Build
 
-Running `go build` in this directory builds the program. Then use an example below as a guide.
+Compile `copyblocks` using `go build`:
+
+```bash
+go build .
+```
 
 ### Example for Google Cloud Storage
 
 ```bash
 ./copyblocks \
-  --source.backend gcs \
-  --destination.backend gcs \
-  --gcs.source.bucket-name <source bucket name> \
-  --gcs.destination.bucket-name <destination bucket name> \
+  --source-service gcs \
+  --destination-service gcs \
   --copy-period 24h \
-  --min-block-duration 13h \
-  --dry-run
+  --min-block-duration 23h \
+  --source-bucket <source bucket name> \
+  --destination-bucket <destination bucket name>
 ```
 
 ### Example for Azure Blob Storage
 
 ```bash
 ./copyblocks \
-  --source.backend azure \
-  --destination.backend azure \
-  --azure.source.container-name <source container name> \
-  --azure.source.account-name <source account name> \
-  --azure.source.account-key <source account key> \
-  --azure.destination.container-name <destination container name> \
-  --azure.destination.account-name <destination account name> \
-  --azure.destination.account-key <destination account key> \
+  --source-service abs \
+  --destination-service abs \
   --copy-period 24h \
-  --min-block-duration 13h \
-  --dry-run
+  --min-block-duration 23h \
+  --source-bucket https://<source account name>.blob.core.windows.net/<source bucket name> \
+  --azure-source-account-name <source account name> \
+  --azure-source-account-key <source account key> \
+  --destination-bucket https://<destination account name>.blob.core.windows.net/<destination bucket name> \
+  --azure-destination-account-name <destination account name> \
+  --azure-destination-account-key <destination account key>
 ```
 
 ### Example for Amazon Simple Storage Service
@@ -56,19 +58,18 @@ Consider passing `--client-side-copy` to avoid having to deal with that.
 
 ```bash
 ./copyblocks \
-  --source.backend s3 \
-  --destination.backend s3 \
-  --s3.source.bucket-name <source bucket name> \
-  --s3.source.access-key-id <source access key id> \
-  --s3.source.secret-access-key <source secret access key> \
-  --s3.source.endpoint <source endpoint> \
-  --s3.destination.bucket-name <destination bucket name> \
-  --s3.destination.access-key-id <destination access key id> \
-  --s3.destination.secret-access-key <destination secret access key> \
-  --s3.destination.endpoint <destination endpoint> \
+  --source-service s3 \
+  --destination-service s3 \
   --copy-period 24h \
-  --min-block-duration 13h \
-  --dry-run
+  --min-block-duration 23h \
+  --source-bucket <source bucket name> \
+  --s3-source-access-key <source access key> \
+  --s3-source-secret-key <source secret key> \
+  --s3-source-endpoint <source endpoint> \
+  --destination-bucket <destination bucket name> \
+  --s3-destination-access-key <destination access key> \
+  --s3-destination-secret-key <destination secret key> \
+  --s3-destination-endpoint <destination endpoint>
 ```
 
 ### Example for copying between different providers
@@ -78,16 +79,15 @@ For instance, to copy from S3 to ABS:
 
 ```bash
 ./copyblocks \
-  --source.backend s3 \
-  --destination.backend azure \
-  --s3.source.bucket-name <source bucket name> \
-  --s3.source.access-key-id <source access key> \
-  --s3.source.secret-access-key <source secret access key> \
-  --s3.source.endpoint <source endpoint> \
-  --azure.destination.container-name <destination container name> \
-  --azure.destination.account-name <destination account name> \
-  --azure.destination.account-key <destination account key> \
+  --source-service s3 \
+  --destination-service abs \
   --copy-period 24h \
-  --min-block-duration 13h \
-  --dry-run
+  --min-block-duration 23h \
+  --source-bucket <source bucket name> \
+  --s3-source-access-key <source access key> \
+  --s3-source-secret-key <source secret key> \
+  --s3-source-endpoint <source endpoint> \
+  --destination-bucket https://<destination account name>.blob.core.windows.net/<destination bucket name> \
+  --azure-destination-account-name <destination account name> \
+  --azure-destination-account-key <destination account key>
 ```

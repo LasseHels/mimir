@@ -24,15 +24,10 @@ that `team-1.b` sends are dropped. And if Grafana Mimir does not see any new sam
 If `team-1.a` goes down for more than 30 seconds, Grafana Mimir’s HA sample handling will have switched and elected `team-1.b` as the leader. The failure
 timeout ensures that too much data is not dropped before failover to the other replica.
 
-{{< admonition type="note" >}}
-In a scenario where the default scrape period is 15 seconds, and the timeouts in Grafana Mimir are set to the default values,
-when a leader-election failover occurs, you'll likely only lose a single scrape of data.
-
-For any query using the `rate()` function, make the rate time interval
-at least four times that of the scrape period to account for any of these failover scenarios.
-
-For example, with the default scrape period of 15 seconds, use a rate time-interval at least 1-minute.
-{{< /admonition >}}
+> **Note:** In a scenario where the default scrape period is 15 seconds, and the timeouts in Grafana Mimir are set to the default values,
+> when a leader-election failover occurs, you'll likely only lose a single scrape of data. For any query using the `rate()` function, make the rate time interval
+> at least four times that of the scrape period to account for any of these failover scenarios.
+> For example, with the default scrape period of 15 seconds, use a rate time-interval at least 1-minute.
 
 ## Distributor high-availability (HA) tracker
 
@@ -74,18 +69,14 @@ global:
     __replica__: replica2
 ```
 
-{{< admonition type="note" >}}
-The preceding labels are external labels and have nothing to do with `remote_write` configuration.
-{{< /admonition >}}
+> **Note:** The preceding labels are external labels and have nothing to do with `remote_write` configuration.
 
 These two label names are configurable on a per-tenant basis within Grafana Mimir. For example, if the label name of one cluster is used by
 some workloads, set the label name of another cluster to something else that uniquely identifies the second cluster.
 
 Set the replica label so that the value for each Prometheus cluster is unique in that cluster.
 
-{{< admonition type="note" >}}
-Grafana Mimir drops this label when ingesting data, but preserves the cluster label. This way, your time series won't change when replicas change.
-{{< /admonition >}}
+> **Note:** Grafana Mimir drops this label when ingesting data, but preserves the cluster label. This way, your timeseries won't change when replicas change.
 
 ### How to configure Grafana Mimir
 
@@ -108,13 +99,8 @@ Alternatively, you can enable the HA tracker only on a per-tenant basis, keeping
 The HA tracker requires a key-value (KV) store to coordinate which replica is currently elected.
 The supported KV stores for the HA tracker are `consul` and `etcd`.
 
-{{< admonition type="note" >}}
-`memberlist` isn't supported.
-
-Memberlist-based KV stores propagate updates using the Gossip protocol, which is too slow for the HA tracker.
-
-The result would be that different distributors might see a different Prometheus server elected as leaders at the same time.
-{{< /admonition >}}
+> **Note:** `memberlist` is not supported. Memberlist-based KV stores propagate updates using the Gossip protocol, which is too slow for the
+> HA tracker. The result would be that different distributors might see a different Prometheus server elected as leaders at the same time.
 
 The following CLI flags (and their respective YAML configuration options) are available for configuring the HA tracker KV store:
 
@@ -132,9 +118,7 @@ Configure the default cluster and replica label names using the following CLI fl
 - `-distributor.ha-tracker.cluster`: Name of the label whose value uniquely identifies a Prometheus HA cluster (defaults to `cluster`).
 - `-distributor.ha-tracker.replica`: Name of the label whose value uniquely identifies a Prometheus replica within the HA cluster (defaults to `__replica__`).
 
-{{< admonition type="note" >}}
-The HA label names can be overridden on a per-tenant basis by setting `ha_cluster_label` and `ha_replica_label` in the overrides section of the runtime configuration.
-{{< /admonition >}}
+> **Note:** The HA label names can be overridden on a per-tenant basis by setting `ha_cluster_label` and `ha_replica_label` in the overrides section of the runtime configuration.
 
 #### Example configuration
 
@@ -151,4 +135,4 @@ distributor:
       [consul | etcd: <config>]
 ```
 
-For more information, see [distributor]({{< relref "./configuration-parameters#distributor" >}}). The HA tracker flags are prefixed with `-distributor.ha-tracker.*`.
+For more information, see [distributor]({{< relref "../references/configuration-parameters#distributor" >}}). The HA tracker flags are prefixed with `-distributor.ha-tracker.*`.

@@ -125,6 +125,7 @@ func TestReaderPool_NewBinaryReader(t *testing.T) {
 			indexHeaderConfig := Config{
 				LazyLoadingEnabled:         testData.lazyReaderEnabled,
 				LazyLoadingIdleTimeout:     testData.lazyReaderIdleTimeout,
+				SparsePersistenceEnabled:   true,
 				EagerLoadingStartupEnabled: testData.eagerLoadReaderEnabled,
 			}
 			pool := NewReaderPool(log.NewNopLogger(), indexHeaderConfig, gate.NewNoop(), metrics, snapshotConfig)
@@ -158,6 +159,7 @@ func TestReaderPool_ShouldCloseIdleLazyReaders(t *testing.T) {
 		LazyLoadingEnabled:         true,
 		LazyLoadingIdleTimeout:     idleTimeout,
 		EagerLoadingStartupEnabled: false,
+		SparsePersistenceEnabled:   true,
 	}, gate.NewNoop(), metrics, nil)
 	defer pool.Close()
 
@@ -224,6 +226,7 @@ func TestReaderPool_PersistLazyLoadedBlock(t *testing.T) {
 		LazyLoadingEnabled:         true,
 		LazyLoadingIdleTimeout:     idleTimeout,
 		EagerLoadingStartupEnabled: true,
+		SparsePersistenceEnabled:   false,
 	}, gate.NewNoop(), metrics, nil)
 	defer pool.Close()
 

@@ -17,7 +17,6 @@ package silence
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -33,11 +32,11 @@ import (
 	"github.com/go-kit/log/level"
 	uuid "github.com/gofrs/uuid"
 	"github.com/matttproud/golang_protobuf_extensions/pbutil"
+	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
 
 	"github.com/prometheus/alertmanager/cluster"
-	"github.com/prometheus/alertmanager/matchers/compat"
 	"github.com/prometheus/alertmanager/pkg/labels"
 	pb "github.com/prometheus/alertmanager/silence/silencepb"
 	"github.com/prometheus/alertmanager/types"
@@ -78,7 +77,7 @@ func (c matcherCache) add(s *pb.Silence) (labels.Matchers, error) {
 		case pb.Matcher_NOT_REGEXP:
 			mt = labels.MatchNotRegexp
 		default:
-			return nil, fmt.Errorf("unknown matcher type %q", m.Type)
+			return nil, errors.Errorf("unknown matcher type %q", m.Type)
 		}
 		matcher, err := labels.NewMatcher(mt, m.Name, m.Pattern)
 		if err != nil {
@@ -332,7 +331,6 @@ func New(o Options) (*Silences, error) {
 	if err := o.validate(); err != nil {
 		return nil, err
 	}
-
 	s := &Silences{
 		clock:     clock.New(),
 		mc:        matcherCache{},
@@ -469,8 +467,9 @@ func (s *Silences) GC() (int, error) {
 	return n, nil
 }
 
-func validateMatcher(m *pb.Matcher) error {
-	if !compat.IsValidLabelName(model.LabelName(m.Name)) {
+// ValidateMatcher runs validation on the matcher name, type, and pattern.
+var ValidateMatcher = func(m *pb.Matcher) error {
+	if !model.LabelName(m.Name).IsValid() {
 		return fmt.Errorf("invalid label name %q", m.Name)
 	}
 	switch m.Type {
@@ -480,7 +479,7 @@ func validateMatcher(m *pb.Matcher) error {
 		}
 	case pb.Matcher_REGEXP, pb.Matcher_NOT_REGEXP:
 		if _, err := regexp.Compile(m.Pattern); err != nil {
-			return fmt.Errorf("invalid regular expression %q: %w", m.Pattern, err)
+			return fmt.Errorf("invalid regular expression %q: %s", m.Pattern, err)
 		}
 	default:
 		return fmt.Errorf("unknown matcher type %q", m.Type)
@@ -508,10 +507,9 @@ func validateSilence(s *pb.Silence) error {
 		return errors.New("at least one matcher required")
 	}
 	allMatchEmpty := true
-
 	for i, m := range s.Matchers {
-		if err := validateMatcher(m); err != nil {
-			return fmt.Errorf("invalid label matcher %d: %w", i, err)
+		if err := ValidateMatcher(m); err != nil {
+			return fmt.Errorf("invalid label matcher %d: %s", i, err)
 		}
 		allMatchEmpty = allMatchEmpty && matchesEmpty(m)
 	}
@@ -547,13 +545,11 @@ func (s *Silences) getSilence(id string) (*pb.Silence, bool) {
 	return msil.Silence, true
 }
 
-func (s *Silences) setSilence(sil *pb.Silence, now time.Time, skipValidate bool) error {
+func (s *Silences) setSilence(sil *pb.Silence, now time.Time) error {
 	sil.UpdatedAt = now
 
-	if !skipValidate {
-		if err := validateSilence(sil); err != nil {
-			return fmt.Errorf("silence invalid: %w", err)
-		}
+	if err := validateSilence(sil); err != nil {
+		return errors.Wrap(err, "silence invalid")
 	}
 
 	msil := &pb.MeshSilence{
@@ -587,19 +583,19 @@ func (s *Silences) Set(sil *pb.Silence) (string, error) {
 	}
 	if ok {
 		if canUpdate(prev, sil, now) {
-			return sil.Id, s.setSilence(sil, now, false)
+			return sil.Id, s.setSilence(sil, now)
 		}
 		if getState(prev, s.nowUTC()) != types.SilenceStateExpired {
 			// We cannot update the silence, expire the old one.
 			if err := s.expire(prev.Id); err != nil {
-				return "", fmt.Errorf("expire previous silence: %w", err)
+				return "", errors.Wrap(err, "expire previous silence")
 			}
 		}
 	}
 	// If we got here it's either a new silence or a replacing one.
 	uid, err := uuid.NewV4()
 	if err != nil {
-		return "", fmt.Errorf("generate uuid: %w", err)
+		return "", errors.Wrap(err, "generate uuid")
 	}
 	sil.Id = uid.String()
 
@@ -607,7 +603,7 @@ func (s *Silences) Set(sil *pb.Silence) (string, error) {
 		sil.StartsAt = now
 	}
 
-	return sil.Id, s.setSilence(sil, now, false)
+	return sil.Id, s.setSilence(sil, now)
 }
 
 // canUpdate returns true if silence a can be updated to b without
@@ -666,9 +662,7 @@ func (s *Silences) expire(id string) error {
 		sil.EndsAt = now
 	}
 
-	// Skip validation of the silence when expiring it. Without this, silences created
-	// with valid UTF-8 matchers cannot be expired when Alertmanager is run in classic mode.
-	return s.setSilence(sil, now, true)
+	return s.setSilence(sil, now)
 }
 
 // QueryParam expresses parameters along which silences are queried.
@@ -957,7 +951,7 @@ func decodeState(r io.Reader) (state, error) {
 			st[s.Silence.Id] = &s
 			continue
 		}
-		if errors.Is(err, io.EOF) {
+		if err == io.EOF {
 			break
 		}
 		return nil, err

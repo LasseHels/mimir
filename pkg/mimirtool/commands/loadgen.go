@@ -67,35 +67,36 @@ type LoadgenCommand struct {
 }
 
 func (c *LoadgenCommand) Register(app *kingpin.Application, _ EnvVarNames, reg prometheus.Registerer) {
-	cmd := app.Command("loadgen", "Simple load generator for Grafana Mimir.").PreAction(func(k *kingpin.ParseContext) error { return c.setup(k, reg) }).Action(c.run)
-	cmd.Flag("write-url", "Remote write URL where to push metrics to (e.g. \"http://mimir.local/api/v1/push\")").
-		Default("").StringVar(&c.writeURL)
+	loadgenCommand := &LoadgenCommand{}
+	cmd := app.Command("loadgen", "Simple load generator for Grafana Mimir.").PreAction(func(k *kingpin.ParseContext) error { return c.setup(k, reg) }).Action(loadgenCommand.run)
+	cmd.Flag("write-url", "").
+		Default("").StringVar(&loadgenCommand.writeURL)
 	cmd.Flag("series-name", "name of the metric that will be generated").
-		Default("node_cpu_seconds_total").StringVar(&c.metricName)
+		Default("node_cpu_seconds_total").StringVar(&loadgenCommand.metricName)
 	cmd.Flag("active-series", "number of active series to send").
-		Default("1000").IntVar(&c.activeSeries)
+		Default("1000").IntVar(&loadgenCommand.activeSeries)
 	cmd.Flag("scrape-interval", "period to send metrics").
-		Default("15s").DurationVar(&c.scrapeInterval)
+		Default("15s").DurationVar(&loadgenCommand.scrapeInterval)
 	cmd.Flag("parallelism", "how many metrics to send simultaneously").
-		Default("10").IntVar(&c.parallelism)
+		Default("10").IntVar(&loadgenCommand.parallelism)
 	cmd.Flag("batch-size", "how big a batch to send").
-		Default("100").IntVar(&c.batchSize)
+		Default("100").IntVar(&loadgenCommand.batchSize)
 	cmd.Flag("write-timeout", "timeout for write requests").
-		Default("500ms").DurationVar(&c.writeTimeout)
+		Default("500ms").DurationVar(&loadgenCommand.writeTimeout)
 
-	cmd.Flag("query-url", "API URL to query from (e.g. \"http://mimir.local/api/v1\")").
-		Default("").StringVar(&c.queryURL)
+	cmd.Flag("query-url", "").
+		Default("").StringVar(&loadgenCommand.queryURL)
 	cmd.Flag("query", "query to run").
-		Default("sum(node_cpu_seconds_total)").StringVar(&c.query)
+		Default("sum(node_cpu_seconds_total)").StringVar(&loadgenCommand.query)
 	cmd.Flag("query-parallelism", "number of queries to run in parallel").
-		Default("10").IntVar(&c.queryParallelism)
+		Default("10").IntVar(&loadgenCommand.queryParallelism)
 	cmd.Flag("query-timeout", "").
-		Default("20s").DurationVar(&c.queryTimeout)
+		Default("20s").DurationVar(&loadgenCommand.queryTimeout)
 	cmd.Flag("query-duration", "length of query").
-		Default("1h").DurationVar(&c.queryDuration)
+		Default("1h").DurationVar(&loadgenCommand.queryDuration)
 
 	cmd.Flag("metrics-listen-address", "address to serve metrics on").
-		Default("127.0.0.1:8080").StringVar(&c.metricsListenAddress)
+		Default(":8080").StringVar(&loadgenCommand.metricsListenAddress)
 }
 
 func (c *LoadgenCommand) setup(_ *kingpin.ParseContext, reg prometheus.Registerer) error {
@@ -138,7 +139,7 @@ func (c *LoadgenCommand) run(_ *kingpin.ParseContext) error {
 			URL:     &config.URL{URL: writeURL},
 			Timeout: model.Duration(c.writeTimeout),
 			Headers: map[string]string{
-				"User-Agent": client.UserAgent(),
+				"User-Agent": client.UserAgent,
 			},
 		})
 		if err != nil {

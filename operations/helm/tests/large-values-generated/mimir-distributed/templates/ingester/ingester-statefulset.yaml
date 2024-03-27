@@ -60,6 +60,10 @@ spec:
         runAsUser: 10001
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+        []
+      nodeSelector:
+        {}
       affinity:
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -83,6 +87,8 @@ spec:
             app.kubernetes.io/name: mimir
             app.kubernetes.io/instance: large-values
             app.kubernetes.io/component: ingester
+      tolerations:
+        []
       terminationGracePeriodSeconds: 240
       volumes:
         - name: config
@@ -143,8 +149,6 @@ spec:
               - ALL
             readOnlyRootFilesystem: true
           env:
-            - name: "JAEGER_REPORTER_MAX_QUEUE_SIZE"
-              value: "1000"
           envFrom:
 ---
 # Source: mimir-distributed/templates/ingester/ingester-statefulset.yaml
@@ -208,6 +212,10 @@ spec:
         runAsUser: 10001
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+        []
+      nodeSelector:
+        {}
       affinity:
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -231,6 +239,8 @@ spec:
             app.kubernetes.io/name: mimir
             app.kubernetes.io/instance: large-values
             app.kubernetes.io/component: ingester
+      tolerations:
+        []
       terminationGracePeriodSeconds: 240
       volumes:
         - name: config
@@ -291,8 +301,6 @@ spec:
               - ALL
             readOnlyRootFilesystem: true
           env:
-            - name: "JAEGER_REPORTER_MAX_QUEUE_SIZE"
-              value: "1000"
           envFrom:
 ---
 # Source: mimir-distributed/templates/ingester/ingester-statefulset.yaml
@@ -356,6 +364,10 @@ spec:
         runAsUser: 10001
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+        []
+      nodeSelector:
+        {}
       affinity:
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -379,6 +391,8 @@ spec:
             app.kubernetes.io/name: mimir
             app.kubernetes.io/instance: large-values
             app.kubernetes.io/component: ingester
+      tolerations:
+        []
       terminationGracePeriodSeconds: 240
       volumes:
         - name: config
@@ -439,6 +453,4 @@ spec:
               - ALL
             readOnlyRootFilesystem: true
           env:
-            - name: "JAEGER_REPORTER_MAX_QUEUE_SIZE"
-              value: "1000"
           envFrom:

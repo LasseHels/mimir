@@ -41,14 +41,13 @@ import (
 // BucketHandle provides operations on a Google Cloud Storage bucket.
 // Use Client.Bucket to get a handle.
 type BucketHandle struct {
-	c                     *Client
-	name                  string
-	acl                   ACLHandle
-	defaultObjectACL      ACLHandle
-	conds                 *BucketConditions
-	userProject           string // project for Requester Pays buckets
-	retry                 *retryConfig
-	enableObjectRetention *bool
+	c                *Client
+	name             string
+	acl              ACLHandle
+	defaultObjectACL ACLHandle
+	conds            *BucketConditions
+	userProject      string // project for Requester Pays buckets
+	retry            *retryConfig
 }
 
 // Bucket returns a BucketHandle, which provides operations on the named bucket.
@@ -86,8 +85,7 @@ func (b *BucketHandle) Create(ctx context.Context, projectID string, attrs *Buck
 	defer func() { trace.EndSpan(ctx, err) }()
 
 	o := makeStorageOpts(true, b.retry, b.userProject)
-
-	if _, err := b.c.tc.CreateBucket(ctx, projectID, b.name, attrs, b.enableObjectRetention, o...); err != nil {
+	if _, err := b.c.tc.CreateBucket(ctx, projectID, b.name, attrs, o...); err != nil {
 		return err
 	}
 	return nil
@@ -275,24 +273,18 @@ func (b *BucketHandle) detectDefaultGoogleAccessID() (string, error) {
 		err := json.Unmarshal(b.c.creds.JSON, &sa)
 		if err != nil {
 			returnErr = err
-		} else {
-			switch sa.CredType {
-			case "impersonated_service_account", "external_account":
-				start, end := strings.LastIndex(sa.SAImpersonationURL, "/"), strings.LastIndex(sa.SAImpersonationURL, ":")
+		} else if sa.CredType == "impersonated_service_account" {
+			start, end := strings.LastIndex(sa.SAImpersonationURL, "/"), strings.LastIndex(sa.SAImpersonationURL, ":")
 
-				if end <= start {
-					returnErr = errors.New("error parsing external or impersonated service account credentials")
-				} else {
-					return sa.SAImpersonationURL[start+1 : end], nil
-				}
-			case "service_account":
-				if sa.ClientEmail != "" {
-					return sa.ClientEmail, nil
-				}
-				returnErr = errors.New("empty service account client email")
-			default:
-				returnErr = errors.New("unable to parse credentials; only service_account, external_account and impersonated_service_account credentials are supported")
+			if end <= start {
+				returnErr = errors.New("error parsing impersonated service account credentials")
+			} else {
+				return sa.SAImpersonationURL[start+1 : end], nil
 			}
+		} else if sa.CredType == "service_account" && sa.ClientEmail != "" {
+			return sa.ClientEmail, nil
+		} else {
+			returnErr = errors.New("unable to parse credentials; only service_account and impersonated_service_account credentials are supported")
 		}
 	}
 
@@ -308,7 +300,7 @@ func (b *BucketHandle) detectDefaultGoogleAccessID() (string, error) {
 		}
 
 	}
-	return "", fmt.Errorf("storage: unable to detect default GoogleAccessID: %w. Please provide the GoogleAccessID or use a supported means for autodetecting it (see https://pkg.go.dev/cloud.google.com/go/storage#hdr-Credential_requirements_for_signing)", returnErr)
+	return "", fmt.Errorf("storage: unable to detect default GoogleAccessID: %w. Please provide the GoogleAccessID or use a supported means for autodetecting it (see https://pkg.go.dev/cloud.google.com/go/storage#hdr-Credential_requirements_for_[BucketHandle.SignedURL]_and_[BucketHandle.GenerateSignedPostPolicyV4])", returnErr)
 }
 
 func (b *BucketHandle) defaultSignBytesFunc(email string) func([]byte) ([]byte, error) {
@@ -470,15 +462,6 @@ type BucketAttrs struct {
 	// allows for the automatic selection of the best storage class
 	// based on object access patterns.
 	Autoclass *Autoclass
-
-	// ObjectRetentionMode reports whether individual objects in the bucket can
-	// be configured with a retention policy. An empty value means that object
-	// retention is disabled.
-	// This field is read-only. Object retention can be enabled only by creating
-	// a bucket with SetObjectRetention set to true on the BucketHandle. It
-	// cannot be modified once the bucket is created.
-	// ObjectRetention cannot be configured or reported through the gRPC API.
-	ObjectRetentionMode string
 }
 
 // BucketPolicyOnly is an alias for UniformBucketLevelAccess.
@@ -774,7 +757,6 @@ func newBucket(b *raw.Bucket) (*BucketAttrs, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	return &BucketAttrs{
 		Name:                     b.Name,
 		Location:                 b.Location,
@@ -789,7 +771,6 @@ func newBucket(b *raw.Bucket) (*BucketAttrs, error) {
 		RequesterPays:            b.Billing != nil && b.Billing.RequesterPays,
 		Lifecycle:                toLifecycle(b.Lifecycle),
 		RetentionPolicy:          rp,
-		ObjectRetentionMode:      toBucketObjectRetention(b.ObjectRetention),
 		CORS:                     toCORS(b.Cors),
 		Encryption:               toBucketEncryption(b.Encryption),
 		Logging:                  toBucketLogging(b.Logging),
@@ -1367,17 +1348,6 @@ func (b *BucketHandle) LockRetentionPolicy(ctx context.Context) error {
 	return b.c.tc.LockBucketRetentionPolicy(ctx, b.name, b.conds, o...)
 }
 
-// SetObjectRetention returns a new BucketHandle that will enable object retention
-// on bucket creation. To enable object retention, you must use the returned
-// handle to create the bucket. This has no effect on an already existing bucket.
-// ObjectRetention is not enabled by default.
-// ObjectRetention cannot be configured through the gRPC API.
-func (b *BucketHandle) SetObjectRetention(enable bool) *BucketHandle {
-	b2 := *b
-	b2.enableObjectRetention = &enable
-	return &b2
-}
-
 // applyBucketConds modifies the provided call using the conditions in conds.
 // call is something that quacks like a *raw.WhateverCall.
 func applyBucketConds(method string, conds *BucketConditions, call interface{}) error {
@@ -1390,11 +1360,11 @@ func applyBucketConds(method string, conds *BucketConditions, call interface{}) 
 	cval := reflect.ValueOf(call)
 	switch {
 	case conds.MetagenerationMatch != 0:
-		if !setIfMetagenerationMatch(cval, conds.MetagenerationMatch) {
+		if !setConditionField(cval, "IfMetagenerationMatch", conds.MetagenerationMatch) {
 			return fmt.Errorf("storage: %s: ifMetagenerationMatch not supported", method)
 		}
 	case conds.MetagenerationNotMatch != 0:
-		if !setIfMetagenerationNotMatch(cval, conds.MetagenerationNotMatch) {
+		if !setConditionField(cval, "IfMetagenerationNotMatch", conds.MetagenerationNotMatch) {
 			return fmt.Errorf("storage: %s: ifMetagenerationNotMatch not supported", method)
 		}
 	}
@@ -1475,13 +1445,6 @@ func toRetentionPolicyFromProto(rp *storagepb.Bucket_RetentionPolicy) *Retention
 		EffectiveTime:   rp.GetEffectiveTime().AsTime(),
 		IsLocked:        rp.GetIsLocked(),
 	}
-}
-
-func toBucketObjectRetention(or *raw.BucketObjectRetention) string {
-	if or == nil {
-		return ""
-	}
-	return or.Mode
 }
 
 func toRawCORS(c []CORS) []*raw.BucketCors {

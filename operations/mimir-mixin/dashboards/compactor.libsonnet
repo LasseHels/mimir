@@ -88,7 +88,6 @@ local fixTargetsForTransformations(panel, refIds) = panel {
   ],
 
   [filename]:
-    assert std.md5(filename) == '1b3443aea86db629e6efdb7d05c53823' : 'UID of the dashboard has changed, please update references to dashboard.';
     ($.dashboard('Compactor') + { uid: std.md5(filename) })
     .addClusterSelectorTemplates()
     .addRow(
@@ -101,7 +100,7 @@ local fixTargetsForTransformations(panel, refIds) = panel {
           'sum(rate(cortex_compactor_runs_failed_total{%s}[$__rate_interval]))' % $.jobMatcher($._config.job_names.compactor)
         ) +
         $.bars +
-        { fieldConfig+: { defaults+: { unit: 'ops' } } } +
+        { yaxes: $.yaxes('ops') } +
         $.panelDescription(
           'Per-instance runs',
           |||
@@ -185,7 +184,7 @@ local fixTargetsForTransformations(panel, refIds) = panel {
         },
       )
       .addPanel(
-        $.timeseriesPanel('Last successful run per-compactor replica') +
+        $.panel('Last successful run per-compactor replica') +
         $.panelDescription(
           'Last successful run per-compactor replica',
           |||
@@ -237,28 +236,9 @@ local fixTargetsForTransformations(panel, refIds) = panel {
     .addRow(
       $.row('')
       .addPanel(
-        $.timeseriesPanel('Estimated Compaction Jobs') +
-        $.queryPanel('sum(cortex_bucket_index_estimated_compaction_jobs{%s}) and (sum(rate(cortex_bucket_index_estimated_compaction_jobs_errors_total{%s}[$__rate_interval])) == 0)' %
-                     [$.jobMatcher($._config.job_names.compactor), $.jobMatcher($._config.job_names.compactor)], 'Jobs') +
-        $.panelDescription(
-          'Estimated Compaction Jobs',
-          |||
-            Estimated number of compaction jobs based on latest version of bucket index. Ingesters upload new blocks every 2 hours (shortly after 01:00 UTC, 03:00 UTC, 05:00 UTC, etc.),
-            and compactors should process all of them within 2h interval. If this graph regularly goes to zero (or close to zero) in 2 hour intervals, then compaction works as designed.
-
-            Metric with number of compaction jobs is computed from blocks in bucket index, which is updated regularly. Metric doesn't change between bucket index updates, even if
-            there were compaction jobs finished in this time. When computing compaction jobs, only jobs that can be executed at given moment are counted. There can be more
-            jobs, but if they are blocked, they are not counted in the metric. For example if there is a split compaction job pending for some time range, no merge job
-            covering the same time range can run. In this case only split compaction job is counted toward the metric, but merge job isn't.
-
-            In other words, computed number of compaction jobs is the minimum number of compaction jobs based on latest version of bucket index.
-          |||
-        ),
-      )
-      .addPanel(
-        $.timeseriesPanel('TSDB compactions / sec') +
+        $.panel('TSDB compactions / sec') +
         $.queryPanel('sum(rate(prometheus_tsdb_compactions_total{%s}[$__rate_interval]))' % $.jobMatcher($._config.job_names.compactor), 'compactions') +
-        { fieldConfig+: { defaults+: { unit: 'ops' } } } +
+        { yaxes: $.yaxes('ops') } +
         $.panelDescription(
           'TSDB compactions / sec',
           |||
@@ -267,7 +247,7 @@ local fixTargetsForTransformations(panel, refIds) = panel {
         ),
       )
       .addPanel(
-        $.timeseriesPanel('TSDB compaction duration') +
+        $.panel('TSDB compaction duration') +
         $.latencyPanel('prometheus_tsdb_compaction_duration_seconds', '{%s}' % $.jobMatcher($._config.job_names.compactor)) +
         $.panelDescription(
           'TSDB compaction duration',
@@ -280,11 +260,11 @@ local fixTargetsForTransformations(panel, refIds) = panel {
     .addRow(
       $.row('')
       .addPanel(
-        $.timeseriesPanel('Average blocks / tenant') +
+        $.panel('Average blocks / tenant') +
         $.queryPanel('avg(max by(user) (cortex_bucket_blocks_count{%s}))' % $.jobMatcher($._config.job_names.compactor), 'avg'),
       )
       .addPanel(
-        $.timeseriesPanel('Tenants with largest number of blocks') +
+        $.panel('Tenants with largest number of blocks') +
         $.queryPanel('topk(10, max by(user) (cortex_bucket_blocks_count{%s}))' % $.jobMatcher($._config.job_names.compactor), '{{user}}') +
         $.panelDescription(
           'Tenants with largest number of blocks',
@@ -297,7 +277,7 @@ local fixTargetsForTransformations(panel, refIds) = panel {
     .addRow(
       $.row('Garbage collector')
       .addPanel(
-        $.timeseriesPanel('Blocks marked for deletion / sec') +
+        $.panel('Blocks marked for deletion / sec') +
         $.queryPanel(
           |||
             sum(rate(cortex_compactor_blocks_marked_for_deletion_total{%(job)s}[$__rate_interval]))
@@ -306,10 +286,10 @@ local fixTargetsForTransformations(panel, refIds) = panel {
           },
           'blocks'
         ) +
-        { fieldConfig+: { defaults+: { unit: 'ops' } } }
+        { yaxes: $.yaxes('ops') },
       )
       .addPanel(
-        $.timeseriesPanel('Blocks deletions / sec') +
+        $.panel('Blocks deletions / sec') +
         $.successFailurePanel(
           // The cortex_compactor_blocks_cleaned_total tracks the number of successfully
           // deleted blocks.
@@ -325,13 +305,13 @@ local fixTargetsForTransformations(panel, refIds) = panel {
           },
         ) +
         $.stack +
-        { fieldConfig+: { defaults+: { unit: 'ops' } } }
+        { yaxes: $.yaxes('ops') }
       )
     )
     .addRow(
       $.row('Metadata sync')
       .addPanel(
-        $.timeseriesPanel('Metadata syncs / sec') +
+        $.panel('Metadata syncs / sec') +
         $.successFailurePanel(
           // The cortex_compactor_meta_syncs_total metric is incremented each time a per-tenant
           // metadata sync is triggered.
@@ -349,10 +329,10 @@ local fixTargetsForTransformations(panel, refIds) = panel {
           },
         ) +
         $.stack +
-        { fieldConfig+: { defaults+: { unit: 'ops' } } }
+        { yaxes: $.yaxes('ops') }
       )
       .addPanel(
-        $.timeseriesPanel('Metadata sync duration') +
+        $.panel('Metadata sync duration') +
         // This metric tracks the duration of a per-tenant metadata sync.
         $.latencyPanel('cortex_compactor_meta_sync_duration_seconds', '{%s}' % $.jobMatcher($._config.job_names.compactor)),
       )

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"math/rand"
-	"sync"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
@@ -64,15 +63,15 @@ type replicationSetContextTracker interface {
 	// The context.CancelFunc will only cancel the context for this instance (ie. if this tracker
 	// is zone-aware, calling the context.CancelFunc should not cancel contexts for other instances
 	// in the same zone).
-	contextFor(instance *InstanceDesc) (context.Context, context.CancelCauseFunc)
+	contextFor(instance *InstanceDesc) (context.Context, context.CancelFunc)
 
 	// Cancels the context for instance previously obtained with contextFor.
 	// This method may cancel the context for other instances if those other instances are part of
 	// the same zone and this tracker is zone-aware.
-	cancelContextFor(instance *InstanceDesc, cause error)
+	cancelContextFor(instance *InstanceDesc)
 
 	// Cancels all contexts previously obtained with contextFor.
-	cancelAllContexts(cause error)
+	cancelAllContexts()
 }
 
 var errResultNotNeeded = errors.New("result from this instance is not needed")
@@ -197,7 +196,7 @@ func (t *defaultResultTracker) startAllRequests() {
 func (t *defaultResultTracker) awaitStart(ctx context.Context, instance *InstanceDesc) error {
 	select {
 	case <-ctx.Done():
-		return context.Cause(ctx)
+		return ctx.Err()
 	case _, ok := <-t.instanceRelease[instance]:
 		if ok {
 			return nil
@@ -209,32 +208,32 @@ func (t *defaultResultTracker) awaitStart(ctx context.Context, instance *Instanc
 
 type defaultContextTracker struct {
 	ctx         context.Context
-	cancelFuncs map[*InstanceDesc]context.CancelCauseFunc
+	cancelFuncs map[*InstanceDesc]context.CancelFunc
 }
 
 func newDefaultContextTracker(ctx context.Context, instances []InstanceDesc) *defaultContextTracker {
 	return &defaultContextTracker{
 		ctx:         ctx,
-		cancelFuncs: make(map[*InstanceDesc]context.CancelCauseFunc, len(instances)),
+		cancelFuncs: make(map[*InstanceDesc]context.CancelFunc, len(instances)),
 	}
 }
 
-func (t *defaultContextTracker) contextFor(instance *InstanceDesc) (context.Context, context.CancelCauseFunc) {
-	ctx, cancel := context.WithCancelCause(t.ctx)
+func (t *defaultContextTracker) contextFor(instance *InstanceDesc) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(t.ctx)
 	t.cancelFuncs[instance] = cancel
 	return ctx, cancel
 }
 
-func (t *defaultContextTracker) cancelContextFor(instance *InstanceDesc, cause error) {
+func (t *defaultContextTracker) cancelContextFor(instance *InstanceDesc) {
 	if cancel, ok := t.cancelFuncs[instance]; ok {
-		cancel(cause)
+		cancel()
 		delete(t.cancelFuncs, instance)
 	}
 }
 
-func (t *defaultContextTracker) cancelAllContexts(cause error) {
+func (t *defaultContextTracker) cancelAllContexts() {
 	for instance, cancel := range t.cancelFuncs {
-		cancel(cause)
+		cancel()
 		delete(t.cancelFuncs, instance)
 	}
 }
@@ -411,7 +410,7 @@ func (t *zoneAwareResultTracker) releaseZone(zone string, shouldStart bool) {
 func (t *zoneAwareResultTracker) awaitStart(ctx context.Context, instance *InstanceDesc) error {
 	select {
 	case <-ctx.Done():
-		return context.Cause(ctx)
+		return ctx.Err()
 	case <-t.zoneRelease[instance.Zone]:
 		if t.zoneShouldStart[instance.Zone].Load() {
 			return nil
@@ -423,18 +422,18 @@ func (t *zoneAwareResultTracker) awaitStart(ctx context.Context, instance *Insta
 
 type zoneAwareContextTracker struct {
 	contexts    map[*InstanceDesc]context.Context
-	cancelFuncs map[*InstanceDesc]context.CancelCauseFunc
+	cancelFuncs map[*InstanceDesc]context.CancelFunc
 }
 
 func newZoneAwareContextTracker(ctx context.Context, instances []InstanceDesc) *zoneAwareContextTracker {
 	t := &zoneAwareContextTracker{
 		contexts:    make(map[*InstanceDesc]context.Context, len(instances)),
-		cancelFuncs: make(map[*InstanceDesc]context.CancelCauseFunc, len(instances)),
+		cancelFuncs: make(map[*InstanceDesc]context.CancelFunc, len(instances)),
 	}
 
 	for i := range instances {
 		instance := &instances[i]
-		ctx, cancel := context.WithCancelCause(ctx)
+		ctx, cancel := context.WithCancel(ctx)
 		t.contexts[instance] = ctx
 		t.cancelFuncs[instance] = cancel
 	}
@@ -442,115 +441,27 @@ func newZoneAwareContextTracker(ctx context.Context, instances []InstanceDesc) *
 	return t
 }
 
-func (t *zoneAwareContextTracker) contextFor(instance *InstanceDesc) (context.Context, context.CancelCauseFunc) {
+func (t *zoneAwareContextTracker) contextFor(instance *InstanceDesc) (context.Context, context.CancelFunc) {
 	return t.contexts[instance], t.cancelFuncs[instance]
 }
 
-func (t *zoneAwareContextTracker) cancelContextFor(instance *InstanceDesc, cause error) {
+func (t *zoneAwareContextTracker) cancelContextFor(instance *InstanceDesc) {
 	// Why not create a per-zone parent context to make this easier?
 	// If we create a per-zone parent context, we'd need to have some way to cancel the per-zone context when the last of the individual
 	// contexts in a zone are cancelled using the context.CancelFunc returned from contextFor.
 	for i, cancel := range t.cancelFuncs {
 		if i.Zone == instance.Zone {
-			cancel(cause)
+			cancel()
 			delete(t.contexts, i)
 			delete(t.cancelFuncs, i)
 		}
 	}
 }
 
-func (t *zoneAwareContextTracker) cancelAllContexts(cause error) {
+func (t *zoneAwareContextTracker) cancelAllContexts() {
 	for instance, cancel := range t.cancelFuncs {
-		cancel(cause)
+		cancel()
 		delete(t.contexts, instance)
 		delete(t.cancelFuncs, instance)
 	}
-}
-
-type inflightInstanceTracker struct {
-	mx       sync.Mutex
-	inflight [][]*InstanceDesc
-
-	// expectMoreInstances is true if more instances are expected to be added to the tracker.
-	expectMoreInstances bool
-}
-
-func newInflightInstanceTracker(sets []ReplicationSet) *inflightInstanceTracker {
-	// Init the inflight tracker.
-	inflight := make([][]*InstanceDesc, len(sets))
-	for idx, set := range sets {
-		inflight[idx] = make([]*InstanceDesc, 0, len(set.Instances))
-	}
-
-	return &inflightInstanceTracker{
-		inflight:            inflight,
-		expectMoreInstances: true,
-	}
-}
-
-// addInstance adds the instance for replicationSetIdx to the tracker.
-//
-// addInstance is idempotent.
-func (t *inflightInstanceTracker) addInstance(replicationSetIdx int, instance *InstanceDesc) {
-	t.mx.Lock()
-	defer t.mx.Unlock()
-
-	// Check if the instance has already been added.
-	for _, curr := range t.inflight[replicationSetIdx] {
-		if curr == instance {
-			return
-		}
-	}
-
-	t.inflight[replicationSetIdx] = append(t.inflight[replicationSetIdx], instance)
-}
-
-// removeInstance removes the instance for replicationSetIdx from the tracker.
-//
-// removeInstance is idempotent.
-func (t *inflightInstanceTracker) removeInstance(replicationSetIdx int, instance *InstanceDesc) {
-	t.mx.Lock()
-	defer t.mx.Unlock()
-
-	for i, curr := range t.inflight[replicationSetIdx] {
-		if curr == instance {
-			instances := t.inflight[replicationSetIdx]
-			t.inflight[replicationSetIdx] = append(instances[:i], instances[i+1:]...)
-
-			// We can safely break the loop because we don't expect multiple occurrences of the same instance.
-			return
-		}
-	}
-}
-
-// allInstancesAdded signals the tracker that all expected instances have been added.
-//
-// allInstancesAdded is idempotent.
-func (t *inflightInstanceTracker) allInstancesAdded() {
-	t.mx.Lock()
-	defer t.mx.Unlock()
-
-	t.expectMoreInstances = false
-}
-
-// allInstancesCompleted returns true if and only if no more instances are expected to be
-// added to the tracker and all previously tracked instances have been removed calling removeInstance().
-func (t *inflightInstanceTracker) allInstancesCompleted() bool {
-	t.mx.Lock()
-	defer t.mx.Unlock()
-
-	// We can't assert all instances have completed if it's still possible
-	// to add new ones to the tracker.
-	if t.expectMoreInstances {
-		return false
-	}
-
-	// Ensure there are no inflight instances for any replication set.
-	for _, instances := range t.inflight {
-		if len(instances) > 0 {
-			return false
-		}
-	}
-
-	return true
 }

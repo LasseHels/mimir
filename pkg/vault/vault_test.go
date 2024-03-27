@@ -15,7 +15,7 @@ import (
 func TestReadSecret(t *testing.T) {
 	mockKVStore := newMockKVStore()
 	mimirVaultClient := Vault{
-		kvStore: mockKVStore,
+		KVStore: mockKVStore,
 	}
 
 	tests := map[string]struct {

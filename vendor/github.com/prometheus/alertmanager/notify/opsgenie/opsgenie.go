@@ -24,6 +24,7 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/pkg/errors"
 	commoncfg "github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
 
@@ -280,13 +281,13 @@ func (n *Notifier) createRequests(ctx context.Context, as ...*types.Alert) ([]*h
 	} else {
 		content, err := os.ReadFile(n.conf.APIKeyFile)
 		if err != nil {
-			return nil, false, fmt.Errorf("read key_file error: %w", err)
+			return nil, false, errors.Wrap(err, "read key_file error")
 		}
 		apiKey = tmpl(string(content))
 	}
 
 	if err != nil {
-		return nil, false, fmt.Errorf("templating error: %w", err)
+		return nil, false, errors.Wrap(err, "templating error")
 	}
 
 	for _, req := range requests {

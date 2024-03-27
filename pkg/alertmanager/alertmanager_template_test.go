@@ -19,7 +19,7 @@ func Test_withCustomFunctions(t *testing.T) {
 		result      string
 		expectError bool
 	}
-	tmpl, err := template.FromGlobs([]string{}, WithCustomFunctions("test"))
+	tmpl, err := template.FromGlobs([]string{}, withCustomFunctions("test"))
 	assert.NoError(t, err)
 	cases := []tc{
 		{

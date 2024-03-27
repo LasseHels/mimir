@@ -13,7 +13,6 @@ type EnvVarNames struct {
 	TenantID              string
 	UseLegacyRoutes       string
 	AuthToken             string
-	ExtraHeaders          string
 }
 
 func NewEnvVarsWithPrefix(prefix string) EnvVarNames {
@@ -28,7 +27,6 @@ func NewEnvVarsWithPrefix(prefix string) EnvVarNames {
 		tlsInsecureSkipVerify = "TLS_INSECURE_SKIP_VERIFY"
 		useLegacyRoutes       = "USE_LEGACY_ROUTES"
 		authToken             = "AUTH_TOKEN"
-		extraHeaders          = "EXTRA_HEADERS"
 	)
 
 	if len(prefix) > 0 && prefix[len(prefix)-1] != '_' {
@@ -46,6 +44,5 @@ func NewEnvVarsWithPrefix(prefix string) EnvVarNames {
 		TenantID:              prefix + tenantID,
 		UseLegacyRoutes:       prefix + useLegacyRoutes,
 		AuthToken:             prefix + authToken,
-		ExtraHeaders:          prefix + extraHeaders,
 	}
 }

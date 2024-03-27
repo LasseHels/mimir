@@ -156,39 +156,24 @@ func (a *iteratorAdapter) At() (int64, float64) {
 	return a.curr.Timestamps[a.curr.Index], a.curr.Values[a.curr.Index]
 }
 
-// AtHistogram implements chunkenc.Iterator. It copies and returns the underlying histogram.
-// If a pointer to a histogram is passed as parameter, the underlying histogram is copied there.
-// Otherwise, a new histogram is created.
-func (a *iteratorAdapter) AtHistogram(h *histogram.Histogram) (int64, *histogram.Histogram) {
+// AtHistogram implements chunkenc.Iterator.
+func (a *iteratorAdapter) AtHistogram() (int64, *histogram.Histogram) {
 	if a.curr.ValueType != chunkenc.ValHistogram {
 		panic(fmt.Sprintf("Cannot read histogram from batch %v", a.curr.ValueType))
 	}
-	if h == nil {
-		h = &histogram.Histogram{}
-	}
-	fromH := (*histogram.Histogram)(a.curr.PointerValues[a.curr.Index])
-	fromH.CopyTo(h)
-	return a.curr.Timestamps[a.curr.Index], h
+	return a.curr.Timestamps[a.curr.Index], (*histogram.Histogram)(a.curr.PointerValues[a.curr.Index])
 }
 
-// AtFloatHistogram implements chunkenc.Iterator. It copies and returns the underlying float histogram.
-// If a pointer to a float histogram is passed as parameter, the underlying float histogram is copied there.
-// Otherwise, a new float histogram is created.
-func (a *iteratorAdapter) AtFloatHistogram(fh *histogram.FloatHistogram) (int64, *histogram.FloatHistogram) {
-	if fh == nil {
-		fh = &histogram.FloatHistogram{}
-	}
+// AtFloatHistogram implements chunkenc.Iterator.
+func (a *iteratorAdapter) AtFloatHistogram() (int64, *histogram.FloatHistogram) {
 	// The promQL engine works on Float Histograms even if the underlying data is an integer histogram
 	// and will call AtFloatHistogram on a Histogram
 	if a.curr.ValueType == chunkenc.ValFloatHistogram {
-		fromFH := (*histogram.FloatHistogram)(a.curr.PointerValues[a.curr.Index])
-		fromFH.CopyTo(fh)
-		return a.curr.Timestamps[a.curr.Index], fh
+		return a.curr.Timestamps[a.curr.Index], (*histogram.FloatHistogram)(a.curr.PointerValues[a.curr.Index])
 	}
 	if a.curr.ValueType == chunkenc.ValHistogram {
-		fromH := (*histogram.Histogram)(a.curr.PointerValues[a.curr.Index])
-		fromH.ToFloat(fh)
-		return a.curr.Timestamps[a.curr.Index], fh
+		h := (*histogram.Histogram)(a.curr.PointerValues[a.curr.Index])
+		return a.curr.Timestamps[a.curr.Index], h.ToFloat()
 	}
 	panic(fmt.Sprintf("Cannot read floathistogram from batch %v", a.curr.ValueType))
 }

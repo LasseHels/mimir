@@ -75,7 +75,7 @@ func copyFromReader[T ~[]byte](ctx context.Context, src io.Reader, dst blockWrit
 		}
 
 		var n int
-		n, err = shared.ReadAtLeast(src, buffer, len(buffer))
+		n, err = io.ReadFull(src, buffer)
 
 		if n > 0 {
 			// some data was read, upload it
@@ -108,7 +108,7 @@ func copyFromReader[T ~[]byte](ctx context.Context, src io.Reader, dst blockWrit
 		}
 
 		if err != nil { // The reader is done, no more outgoing buffers
-			if errors.Is(err, io.EOF) {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				// these are expected errors, we don't surface those
 				err = nil
 			} else {

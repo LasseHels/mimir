@@ -30,7 +30,6 @@ local filename = 'mimir-overview.json';
       writesResourcesDashboardURL: $.dashboardURL('mimir-writes-resources.json'),
     };
 
-    assert std.md5(filename) == 'ffcd83628d7d4b5a03d1cafd159e6c9c' : 'UID of the dashboard has changed, please update references to dashboard.';
     ($.dashboard('Overview') + { uid: std.md5(filename) })
     .addClusterSelectorTemplates()
 
@@ -114,7 +113,7 @@ local filename = 'mimir-overview.json';
         ||| % helpers),
       )
       .addPanel(
-        $.timeseriesPanel(std.stripChars('Write requests / sec %(gatewayEnabledPanelTitleSuffix)s' % helpers, ' ')) +
+        $.panel(std.stripChars('Write requests / sec %(gatewayEnabledPanelTitleSuffix)s' % helpers, ' ')) +
         $.qpsPanel(
           if $._config.gateway_enabled then
             $.queries.gateway.writeRequestsPerSecond
@@ -123,21 +122,21 @@ local filename = 'mimir-overview.json';
         )
       )
       .addPanel(
-        $.timeseriesPanel(std.stripChars('Write latency %(gatewayEnabledPanelTitleSuffix)s' % helpers, ' ')) + (
+        $.panel(std.stripChars('Write latency %(gatewayEnabledPanelTitleSuffix)s' % helpers, ' ')) + (
           if $._config.gateway_enabled then
-            $.latencyRecordingRulePanel('cortex_request_duration_seconds', $.jobSelector($._config.job_names.gateway) + [utils.selector.re('route', $.queries.write_http_routes_regex)])
+            utils.latencyRecordingRulePanel('cortex_request_duration_seconds', $.jobSelector($._config.job_names.gateway) + [utils.selector.re('route', $.queries.write_http_routes_regex)])
           else
-            $.latencyRecordingRulePanel('cortex_request_duration_seconds', $.jobSelector($._config.job_names.distributor) + [utils.selector.re('route', '/distributor.Distributor/Push|/httpgrpc.*|%s' % $.queries.write_http_routes_regex)])
+            utils.latencyRecordingRulePanel('cortex_request_duration_seconds', $.jobSelector($._config.job_names.distributor) + [utils.selector.re('route', '/distributor.Distributor/Push|/httpgrpc.*|%s' % $.queries.write_http_routes_regex)])
         )
       )
       .addPanel(
-        $.timeseriesPanel('Ingestion / sec') +
+        $.panel('Ingestion / sec') +
         $.queryPanel(
           [$.queries.distributor.samplesPerSecond, $.queries.distributor.exemplarsPerSecond],
           ['samples / sec', 'exemplars / sec'],
         ) +
         $.stack +
-        { fieldConfig+: { defaults+: { unit: 'cps' } } },
+        { yaxes: $.yaxes('cps') },
       )
     )
 
@@ -158,7 +157,7 @@ local filename = 'mimir-overview.json';
         ||| % helpers),
       )
       .addPanel(
-        $.timeseriesPanel(std.stripChars('Read requests / sec %(gatewayEnabledPanelTitleSuffix)s' % helpers, ' ')) +
+        $.panel(std.stripChars('Read requests / sec %(gatewayEnabledPanelTitleSuffix)s' % helpers, ' ')) +
         $.qpsPanel(
           if $._config.gateway_enabled then
             $.queries.gateway.readRequestsPerSecond
@@ -167,37 +166,34 @@ local filename = 'mimir-overview.json';
         )
       )
       .addPanel(
-        $.timeseriesPanel(std.stripChars('Read latency %(gatewayEnabledPanelTitleSuffix)s' % helpers, ' ')) + (
+        $.panel(std.stripChars('Read latency %(gatewayEnabledPanelTitleSuffix)s' % helpers, ' ')) + (
           if $._config.gateway_enabled then
-            $.latencyRecordingRulePanel('cortex_request_duration_seconds', $.jobSelector($._config.job_names.gateway) + [utils.selector.re('route', $.queries.read_http_routes_regex)])
+            utils.latencyRecordingRulePanel('cortex_request_duration_seconds', $.jobSelector($._config.job_names.gateway) + [utils.selector.re('route', $.queries.read_http_routes_regex)])
           else
-            $.latencyRecordingRulePanel('cortex_request_duration_seconds', $.jobSelector($._config.job_names.query_frontend) + [utils.selector.re('route', $.queries.read_http_routes_regex)])
+            utils.latencyRecordingRulePanel('cortex_request_duration_seconds', $.jobSelector($._config.job_names.query_frontend) + [utils.selector.re('route', $.queries.read_http_routes_regex)])
         )
       )
       .addPanel(
-        $.timeseriesPanel('Queries / sec') +
-        {
-          targets: [
-            {
-              expr: $.queries.query_frontend.overviewRoutesPerSecond,
-              format: 'time_series',
-              legendLink: null,
-            },
-            {
-              expr: $.queries.query_frontend.nonOverviewRoutesPerSecond,
-              format: 'time_series',
-              legendFormat: 'other',
-              legendLink: null,
-            },
+        local legends = ['instant queries', 'range queries', '"label names" queries', '"label values" queries', 'series queries', 'remote read queries', 'metadata queries', 'exemplar queries', 'other'];
+
+        $.panel('Queries / sec') +
+        $.queryPanel(
+          [
+            $.queries.query_frontend.instantQueriesPerSecond,
+            $.queries.query_frontend.rangeQueriesPerSecond,
+            $.queries.query_frontend.labelNamesQueriesPerSecond,
+            $.queries.query_frontend.labelValuesQueriesPerSecond,
+            $.queries.query_frontend.seriesQueriesPerSecond,
+            $.queries.query_frontend.remoteReadQueriesPerSecond,
+            $.queries.query_frontend.metadataQueriesPerSecond,
+            $.queries.query_frontend.exemplarsQueriesPerSecond,
+            $.queries.query_frontend.otherQueriesPerSecond,
           ],
-        } +
-        {
-          fieldConfig+: {
-            defaults+: { unit: 'reqps' },
-            overrides+: $.overridesNonErrorColorsPalette($.queries.query_frontend.overviewRoutesOverrides),
-          },
-        } +
-        $.stack
+          legends,
+        ) +
+        $.panelSeriesNonErrorColorsPalette(legends) +
+        $.stack +
+        { yaxes: $.yaxes('reqps') },
       )
     )
 
@@ -216,7 +212,7 @@ local filename = 'mimir-overview.json';
         ||| % helpers),
       )
       .addPanel(
-        $.timeseriesPanel('Rule evaluations / sec') +
+        $.panel('Rule evaluations / sec') +
         $.successFailureCustomPanel(
           [
             $.queries.ruler.evaluations.successPerSecond,
@@ -227,15 +223,15 @@ local filename = 'mimir-overview.json';
         )
       )
       .addPanel(
-        $.timeseriesPanel('Rule evaluations latency') +
+        $.panel('Rule evaluations latency') +
         $.queryPanel(
           $.queries.ruler.evaluations.latency,
           'average'
         ) +
-        { fieldConfig+: { defaults+: { unit: 's' } } },
+        { yaxes: $.yaxes('s') },
       )
       .addPanel(
-        $.timeseriesPanel('Alerting notifications sent to Alertmanager / sec') +
+        $.panel('Alerting notifications sent to Alertmanager / sec') +
         $.successFailurePanel($.queries.ruler.notifications.successPerSecond, $.queries.ruler.notifications.failurePerSecond) +
         $.stack
       )
@@ -253,20 +249,20 @@ local filename = 'mimir-overview.json';
         ||| % helpers),
       )
       .addPanel(
-        $.timeseriesPanel('Requests / sec') +
+        $.panel('Requests / sec') +
         $.successFailurePanel($.queries.storage.successPerSecond, $.queries.storage.failurePerSecond) +
         $.stack +
-        { fieldConfig+: { defaults+: { unit: 'reqps' } } }
+        { yaxes: $.yaxes('reqps') },
       )
       .addPanel(
-        $.timeseriesPanel('Operations / sec') +
+        $.panel('Operations / sec') +
         $.queryPanel('sum by(operation) (rate(thanos_objstore_bucket_operations_total{%s}[$__rate_interval]))' % $.namespaceMatcher(), '{{operation}}') +
         $.panelSeriesNonErrorColorsPalette(['attributes', 'delete', 'exists', 'get', 'get_range', 'iter', 'upload']) +
         $.stack +
-        { fieldConfig+: { defaults+: { unit: 'reqps' } } },
+        { yaxes: $.yaxes('reqps') },
       )
       .addPanel(
-        $.timeseriesPanel('Total number of blocks in the storage') +
+        $.panel('Total number of blocks in the storage') +
         // Look at the max over the last 15m to correctly work during rollouts
         // (the metrics disappear until the next cleanup runs).
         $.queryPanel('sum(max by(user) (max_over_time(cortex_bucket_blocks_count{%s}[15m])))' % $.jobMatcher($._config.job_names.compactor), 'blocks'),

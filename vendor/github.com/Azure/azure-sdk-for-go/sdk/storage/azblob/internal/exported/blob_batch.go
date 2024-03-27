@@ -49,7 +49,7 @@ func createBatchID() (string, error) {
 // Content-Length: 0
 func buildSubRequest(req *policy.Request) []byte {
 	var batchSubRequest strings.Builder
-	blobPath := req.Raw().URL.EscapedPath()
+	blobPath := req.Raw().URL.Path
 	if len(req.Raw().URL.RawQuery) > 0 {
 		blobPath += "?" + req.Raw().URL.RawQuery
 	}

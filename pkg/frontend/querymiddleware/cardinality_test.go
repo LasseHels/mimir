@@ -21,7 +21,7 @@ import (
 	"github.com/grafana/mimir/pkg/util"
 )
 
-func Test_cardinalityEstimateBucket_QueryRequest_keyFormat(t *testing.T) {
+func Test_cardinalityEstimateBucket_GenerateCacheKey_keyFormat(t *testing.T) {
 	requestTime := parseTimeRFC3339(t, "2023-01-09T03:24:12Z")
 	hoursSinceEpoch := util.TimeToMillis(requestTime) / time.Hour.Milliseconds()
 	daysSinceEpoch := hoursSinceEpoch / 24
@@ -29,7 +29,7 @@ func Test_cardinalityEstimateBucket_QueryRequest_keyFormat(t *testing.T) {
 	tests := []struct {
 		name     string
 		userID   string
-		r        MetricsQueryRequest
+		r        Request
 		expected string
 	}{
 		{
@@ -133,7 +133,7 @@ func Test_cardinalityEstimation_Do(t *testing.T) {
 		Query: "up",
 	}
 	addSeriesHandler := func(estimate, actual uint64) HandlerFunc {
-		return func(ctx context.Context, request MetricsQueryRequest) (Response, error) {
+		return func(ctx context.Context, request Request) (Response, error) {
 			require.NotNil(t, request.GetHints())
 			request.GetHints().GetCardinalityEstimate()
 			require.Equal(t, request.GetHints().GetEstimatedSeriesCount(), estimate)
@@ -158,7 +158,7 @@ func Test_cardinalityEstimation_Do(t *testing.T) {
 		{
 			name:     "no tenantID",
 			tenantID: "",
-			downstreamHandler: func(_ context.Context, _ MetricsQueryRequest) (Response, error) {
+			downstreamHandler: func(_ context.Context, _ Request) (Response, error) {
 				return &PrometheusResponse{}, nil
 			},
 			expectedLoads:  0,
@@ -168,7 +168,7 @@ func Test_cardinalityEstimation_Do(t *testing.T) {
 		{
 			name:     "downstream error",
 			tenantID: "1",
-			downstreamHandler: func(_ context.Context, _ MetricsQueryRequest) (Response, error) {
+			downstreamHandler: func(_ context.Context, _ Request) (Response, error) {
 				return nil, errors.New("test error")
 			},
 			expectedLoads:  1,
@@ -205,7 +205,7 @@ func Test_cardinalityEstimation_Do(t *testing.T) {
 		{
 			name:     "with empty cache",
 			tenantID: "1",
-			downstreamHandler: func(ctx context.Context, request MetricsQueryRequest) (Response, error) {
+			downstreamHandler: func(ctx context.Context, request Request) (Response, error) {
 				queryStats := stats.FromContext(ctx)
 				queryStats.AddFetchedSeries(numSeries)
 				return &PrometheusResponse{}, nil
@@ -241,7 +241,7 @@ func Test_cardinalityEstimation_Do(t *testing.T) {
 
 }
 
-func Test_cardinalityEstimateBucket_QueryRequest_requestEquality(t *testing.T) {
+func Test_cardinalityEstimateBucket_GenerateCacheKey_requestEquality(t *testing.T) {
 	rangeQuery := &PrometheusRangeQueryRequest{
 		Start: util.TimeToMillis(parseTimeRFC3339(t, "2023-01-31T09:00:00Z")),
 		End:   util.TimeToMillis(parseTimeRFC3339(t, "2023-01-31T10:00:00Z")),
@@ -251,8 +251,8 @@ func Test_cardinalityEstimateBucket_QueryRequest_requestEquality(t *testing.T) {
 		name          string
 		tenantA       string
 		tenantB       string
-		requestA      MetricsQueryRequest
-		requestB      MetricsQueryRequest
+		requestA      Request
+		requestB      Request
 		expectedEqual bool
 	}{
 		{

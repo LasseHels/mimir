@@ -129,7 +129,6 @@ func (p *FileAWSCredentials) Retrieve() (Value, error) {
 			AccessKeyID:     externalProcessCredentials.AccessKeyID,
 			SecretAccessKey: externalProcessCredentials.SecretAccessKey,
 			SessionToken:    externalProcessCredentials.SessionToken,
-			Expiration:      externalProcessCredentials.Expiration,
 			SignerType:      SignatureV4,
 		}, nil
 	}

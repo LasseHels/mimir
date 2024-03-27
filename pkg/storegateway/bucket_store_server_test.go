@@ -33,7 +33,35 @@ type storeTestServer struct {
 	// requestSeries is the function to call the Series() API endpoint
 	// via gRPC. The actual implementation depends whether we're calling
 	// the StoreGateway or BucketStore API endpoint.
-	requestSeries func(ctx context.Context, conn *grpc.ClientConn, req *storepb.SeriesRequest) (storegatewaypb.StoreGateway_SeriesClient, error)
+	requestSeries func(ctx context.Context, conn *grpc.ClientConn, req *storepb.SeriesRequest) (storepb.Store_SeriesClient, error)
+}
+
+func newBucketStoreTestServer(t testing.TB, store storepb.StoreServer) *storeTestServer {
+	listener, err := net.Listen("tcp", "localhost:0")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = listener.Close()
+	})
+
+	s := &storeTestServer{
+		server:         grpc.NewServer(),
+		serverListener: listener,
+		requestSeries: func(ctx context.Context, conn *grpc.ClientConn, req *storepb.SeriesRequest) (storepb.Store_SeriesClient, error) {
+			client := storepb.NewStoreClient(conn)
+			return client.Series(ctx, req)
+		},
+	}
+
+	storepb.RegisterStoreServer(s.server, store)
+
+	go func() {
+		_ = s.server.Serve(listener)
+	}()
+
+	// Stop the gRPC server once the test has done.
+	t.Cleanup(s.server.GracefulStop)
+
+	return s
 }
 
 func newStoreGatewayTestServer(t testing.TB, store storegatewaypb.StoreGatewayServer) *storeTestServer {
@@ -46,8 +74,8 @@ func newStoreGatewayTestServer(t testing.TB, store storegatewaypb.StoreGatewaySe
 	s := &storeTestServer{
 		server:         grpc.NewServer(),
 		serverListener: listener,
-		requestSeries: func(ctx context.Context, conn *grpc.ClientConn, req *storepb.SeriesRequest) (storegatewaypb.StoreGateway_SeriesClient, error) {
-			client := storegatewaypb.NewCustomStoreGatewayClient(conn)
+		requestSeries: func(ctx context.Context, conn *grpc.ClientConn, req *storepb.SeriesRequest) (storepb.Store_SeriesClient, error) {
+			client := storegatewaypb.NewStoreGatewayClient(conn)
 			return client.Series(ctx, req)
 		},
 	}
@@ -69,7 +97,7 @@ func newStoreGatewayTestServer(t testing.TB, store storegatewaypb.StoreGatewaySe
 func (s *storeTestServer) Series(ctx context.Context, req *storepb.SeriesRequest) (seriesSet []*storepb.Series, warnings annotations.Annotations, hints hintspb.SeriesResponseHints, estimatedChunks uint64, err error) {
 	var (
 		conn               *grpc.ClientConn
-		stream             storegatewaypb.StoreGateway_SeriesClient
+		stream             storepb.Store_SeriesClient
 		res                *storepb.SeriesResponse
 		streamingSeriesSet []*storepb.StreamingSeries
 	)

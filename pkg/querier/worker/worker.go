@@ -17,13 +17,13 @@ import (
 	"github.com/go-kit/log/level"
 	"github.com/grafana/dskit/grpcclient"
 	"github.com/grafana/dskit/httpgrpc"
-	"github.com/grafana/dskit/servicediscovery"
 	"github.com/grafana/dskit/services"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 
 	"github.com/grafana/mimir/pkg/scheduler/schedulerdiscovery"
+	"github.com/grafana/mimir/pkg/util/servicediscovery"
 )
 
 type Config struct {
@@ -33,7 +33,6 @@ type Config struct {
 	QuerierID                      string            `yaml:"id" category:"advanced"`
 	QueryFrontendGRPCClientConfig  grpcclient.Config `yaml:"grpc_client_config" doc:"description=Configures the gRPC client used to communicate between the querier and the query-frontend."`
 	QuerySchedulerGRPCClientConfig grpcclient.Config `yaml:"query_scheduler_grpc_client_config" doc:"description=Configures the gRPC client used to communicate between the querier and the query-scheduler."`
-	ResponseStreamingEnabled       bool              `yaml:"response_streaming_enabled" category:"experimental"`
 
 	// This configuration is injected internally.
 	MaxConcurrentRequests   int                       `yaml:"-"` // Must be same as passed to PromQL Engine.
@@ -45,7 +44,6 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet) {
 	f.StringVar(&cfg.FrontendAddress, "querier.frontend-address", "", "Address of the query-frontend component, in host:port format. If multiple query-frontends are running, the host should be a DNS resolving to all query-frontend instances. This option should be set only when query-scheduler component is not in use.")
 	f.DurationVar(&cfg.DNSLookupPeriod, "querier.dns-lookup-period", 10*time.Second, "How often to query DNS for query-frontend or query-scheduler address.")
 	f.StringVar(&cfg.QuerierID, "querier.id", "", "Querier ID, sent to the query-frontend to identify requests from the same querier. Defaults to hostname.")
-	f.BoolVar(&cfg.ResponseStreamingEnabled, "querier.response-streaming-enabled", false, "Enables streaming of responses from querier to query-frontend for response types that support it (currently only `active_series` responses do).")
 
 	cfg.QueryFrontendGRPCClientConfig.RegisterFlagsWithPrefix("querier.frontend-client", f)
 	cfg.QuerySchedulerGRPCClientConfig.RegisterFlagsWithPrefix("querier.scheduler-client", f)
@@ -145,7 +143,7 @@ func NewQuerierWorker(cfg Config, handler RequestHandler, log log.Logger, reg pr
 		level.Info(log).Log("msg", "Starting querier worker connected to query-frontend", "frontend", cfg.FrontendAddress)
 
 		factory = func(receiver servicediscovery.Notifications) (services.Service, error) {
-			return servicediscovery.NewDNS(log, cfg.FrontendAddress, cfg.DNSLookupPeriod, receiver)
+			return servicediscovery.NewDNS(cfg.FrontendAddress, cfg.DNSLookupPeriod, receiver)
 		}
 
 		grpcCfg = cfg.QueryFrontendGRPCClientConfig
@@ -215,7 +213,7 @@ func (w *querierWorker) stopping(_ error) error {
 	// worker no longer creates new managers in InstanceAdded method.
 	w.mu.Lock()
 	for address, m := range w.managers {
-		m.stop("querier shutting down")
+		m.stop()
 
 		delete(w.managers, address)
 		delete(w.instances, address)
@@ -272,7 +270,7 @@ func (w *querierWorker) InstanceRemoved(instance servicediscovery.Instance) {
 	w.mu.Unlock()
 
 	if p != nil {
-		p.stop("instance removed")
+		p.stop()
 	}
 
 	// Re-balance the connections between the available query-frontends / query-schedulers.
@@ -321,7 +319,7 @@ func (w *querierWorker) resetConcurrency() {
 			concurrency = 1
 		}
 
-		m.concurrency(concurrency, "resetting worker concurrency")
+		m.concurrency(concurrency)
 	}
 }
 

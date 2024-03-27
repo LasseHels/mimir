@@ -36,20 +36,19 @@ type blocksPageContents struct {
 }
 
 type formattedBlockData struct {
-	ULID             string
-	ULIDTime         string
-	SplitID          *uint32
-	MinTime          string
-	MaxTime          string
-	Duration         string
-	DeletedTime      string
-	CompactionLevel  int
-	BlockSize        string
-	Labels           string
-	NoCompactDetails []string
-	Sources          []string
-	Parents          []string
-	Stats            prom_tsdb.BlockStats
+	ULID            string
+	ULIDTime        string
+	SplitID         *uint32
+	MinTime         string
+	MaxTime         string
+	Duration        string
+	DeletedTime     string
+	CompactionLevel int
+	BlockSize       string
+	Labels          string
+	Sources         []string
+	Parents         []string
+	Stats           prom_tsdb.BlockStats
 }
 
 type richMeta struct {
@@ -82,7 +81,7 @@ func (s *StoreGateway) BlocksHandler(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 
-	metasMap, deleteMarkerDetails, noCompactMarkerDetails, err := listblocks.LoadMetaFilesAndMarkers(req.Context(), s.stores.bucket, tenantID, showDeleted, time.Time{})
+	metasMap, deletedTimes, err := listblocks.LoadMetaFilesAndDeletionMarkers(req.Context(), s.stores.bucket, tenantID, showDeleted, time.Time{})
 	if err != nil {
 		util.WriteTextResponse(w, fmt.Sprintf("Failed to read block metadata: %s", err))
 		return
@@ -93,7 +92,7 @@ func (s *StoreGateway) BlocksHandler(w http.ResponseWriter, req *http.Request) {
 	richMetas := make([]richMeta, 0, len(metas))
 
 	for _, m := range metas {
-		if !showDeleted && deleteMarkerDetails[m.ULID].DeletionTime != 0 {
+		if !showDeleted && !deletedTimes[m.ULID].IsZero() {
 			continue
 		}
 		var parents []string
@@ -110,33 +109,24 @@ func (s *StoreGateway) BlocksHandler(w http.ResponseWriter, req *http.Request) {
 			blockSplitID = &bsc
 		}
 		lbls := labels.FromMap(m.Thanos.Labels)
-		noCompactDetails := []string{}
-		if val, ok := noCompactMarkerDetails[m.ULID]; ok {
-			noCompactDetails = []string{
-				fmt.Sprintf("Time: %s", formatTimeIfNotZero(val.NoCompactTime, time.RFC3339)),
-				fmt.Sprintf("Reason: %s", val.Reason),
-			}
-		}
-
 		formattedBlocks = append(formattedBlocks, formattedBlockData{
-			ULID:             m.ULID.String(),
-			ULIDTime:         util.TimeFromMillis(int64(m.ULID.Time())).UTC().Format(time.RFC3339),
-			SplitID:          blockSplitID,
-			MinTime:          util.TimeFromMillis(m.MinTime).UTC().Format(time.RFC3339),
-			MaxTime:          util.TimeFromMillis(m.MaxTime).UTC().Format(time.RFC3339),
-			Duration:         util.TimeFromMillis(m.MaxTime).Sub(util.TimeFromMillis(m.MinTime)).String(),
-			DeletedTime:      formatTimeIfNotZero(deleteMarkerDetails[m.ULID].DeletionTime, time.RFC3339),
-			NoCompactDetails: noCompactDetails,
-			CompactionLevel:  m.Compaction.Level,
-			BlockSize:        listblocks.GetFormattedBlockSize(m),
-			Labels:           lbls.String(),
-			Sources:          sources,
-			Parents:          parents,
-			Stats:            m.Stats,
+			ULID:            m.ULID.String(),
+			ULIDTime:        util.TimeFromMillis(int64(m.ULID.Time())).UTC().Format(time.RFC3339),
+			SplitID:         blockSplitID,
+			MinTime:         util.TimeFromMillis(m.MinTime).UTC().Format(time.RFC3339),
+			MaxTime:         util.TimeFromMillis(m.MaxTime).UTC().Format(time.RFC3339),
+			Duration:        util.TimeFromMillis(m.MaxTime).Sub(util.TimeFromMillis(m.MinTime)).String(),
+			DeletedTime:     formatTimeIfNotZero(deletedTimes[m.ULID].UTC(), time.RFC3339),
+			CompactionLevel: m.Compaction.Level,
+			BlockSize:       listblocks.GetFormattedBlockSize(m),
+			Labels:          lbls.String(),
+			Sources:         sources,
+			Parents:         parents,
+			Stats:           m.Stats,
 		})
 		var deletedAt *int64
-		if dt, ok := deleteMarkerDetails[m.ULID]; ok {
-			deletedAtTime := dt.DeletionTime * int64(time.Second/time.Millisecond)
+		if dt, ok := deletedTimes[m.ULID]; ok {
+			deletedAtTime := dt.UnixMilli()
 			deletedAt = &deletedAtTime
 		}
 		richMetas = append(richMetas, richMeta{
@@ -159,9 +149,10 @@ func (s *StoreGateway) BlocksHandler(w http.ResponseWriter, req *http.Request) {
 	}, blocksPageTemplate, req)
 }
 
-func formatTimeIfNotZero(t int64, format string) string {
-	if t == 0 {
+func formatTimeIfNotZero(t time.Time, format string) string {
+	if t.IsZero() {
 		return ""
 	}
-	return time.Unix(t, 0).UTC().Format(format)
+
+	return t.Format(format)
 }

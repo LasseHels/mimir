@@ -28,7 +28,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,7 +37,6 @@ import (
 	"google.golang.org/grpc/internal/channelz"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/resolver"
 	"google.golang.org/grpc/stats"
 	"google.golang.org/grpc/status"
@@ -267,8 +265,7 @@ type Stream struct {
 	// headerValid indicates whether a valid header was received.  Only
 	// meaningful after headerChan is closed (always call waitOnHeader() before
 	// reading its value).  Not valid on server side.
-	headerValid      bool
-	headerWireLength int // Only set on server side.
+	headerValid bool
 
 	// hdrMu protects header and trailer metadata on the server-side.
 	hdrMu sync.Mutex
@@ -363,12 +360,8 @@ func (s *Stream) SendCompress() string {
 
 // ClientAdvertisedCompressors returns the compressor names advertised by the
 // client via grpc-accept-encoding header.
-func (s *Stream) ClientAdvertisedCompressors() []string {
-	values := strings.Split(s.clientAdvertisedCompressors, ",")
-	for i, v := range values {
-		values[i] = strings.TrimSpace(v)
-	}
-	return values
+func (s *Stream) ClientAdvertisedCompressors() string {
+	return s.clientAdvertisedCompressors
 }
 
 // Done returns a channel which is closed when it receives the final status
@@ -432,12 +425,6 @@ func (s *Stream) Context() context.Context {
 	return s.ctx
 }
 
-// SetContext sets the context of the stream. This will be deleted once the
-// stats handler callouts all move to gRPC layer.
-func (s *Stream) SetContext(ctx context.Context) {
-	s.ctx = ctx
-}
-
 // Method returns the method for the stream.
 func (s *Stream) Method() string {
 	return s.method
@@ -448,12 +435,6 @@ func (s *Stream) Method() string {
 // that is, after Done() is closed.
 func (s *Stream) Status() *status.Status {
 	return s.status
-}
-
-// HeaderWireLength returns the size of the headers of the stream as received
-// from the wire. Valid only on the server.
-func (s *Stream) HeaderWireLength() int {
-	return s.headerWireLength
 }
 
 // SetHeader sets the header metadata. This can be called multiple times.
@@ -717,7 +698,7 @@ type ClientTransport interface {
 // Write methods for a given Stream will be called serially.
 type ServerTransport interface {
 	// HandleStreams receives incoming streams using the given handler.
-	HandleStreams(context.Context, func(*Stream))
+	HandleStreams(func(*Stream))
 
 	// WriteHeader sends the header metadata for the given stream.
 	// WriteHeader may not be called on all streams.
@@ -736,8 +717,8 @@ type ServerTransport interface {
 	// handlers will be terminated asynchronously.
 	Close(err error)
 
-	// Peer returns the peer of the server transport.
-	Peer() *peer.Peer
+	// RemoteAddr returns the remote network address.
+	RemoteAddr() net.Addr
 
 	// Drain notifies the client this ServerTransport stops accepting new RPCs.
 	Drain(debugData string)

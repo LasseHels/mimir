@@ -6,8 +6,6 @@ package api
 import (
 	"encoding/json"
 	"time"
-
-	"github.com/hashicorp/go-multierror"
 )
 
 type ServiceRouterConfigEntry struct {
@@ -41,10 +39,9 @@ type ServiceRouteMatch struct {
 }
 
 type ServiceRouteHTTPMatch struct {
-	PathExact       string `json:",omitempty" alias:"path_exact"`
-	PathPrefix      string `json:",omitempty" alias:"path_prefix"`
-	PathRegex       string `json:",omitempty" alias:"path_regex"`
-	CaseInsensitive bool   `json:",omitempty" alias:"case_insensitive"`
+	PathExact  string `json:",omitempty" alias:"path_exact"`
+	PathPrefix string `json:",omitempty" alias:"path_prefix"`
+	PathRegex  string `json:",omitempty" alias:"path_regex"`
 
 	Header     []ServiceRouteHTTPMatchHeader     `json:",omitempty"`
 	QueryParam []ServiceRouteHTTPMatchQueryParam `json:",omitempty" alias:"query_param"`
@@ -192,18 +189,13 @@ func (e *ServiceResolverConfigEntry) MarshalJSON() ([]byte, error) {
 	type Alias ServiceResolverConfigEntry
 	exported := &struct {
 		ConnectTimeout string `json:",omitempty"`
-		RequestTimeout string `json:",omitempty"`
 		*Alias
 	}{
 		ConnectTimeout: e.ConnectTimeout.String(),
-		RequestTimeout: e.RequestTimeout.String(),
 		Alias:          (*Alias)(e),
 	}
 	if e.ConnectTimeout == 0 {
 		exported.ConnectTimeout = ""
-	}
-	if e.RequestTimeout == 0 {
-		exported.RequestTimeout = ""
 	}
 
 	return json.Marshal(exported)
@@ -213,27 +205,20 @@ func (e *ServiceResolverConfigEntry) UnmarshalJSON(data []byte) error {
 	type Alias ServiceResolverConfigEntry
 	aux := &struct {
 		ConnectTimeout string
-		RequestTimeout string
 		*Alias
 	}{
 		Alias: (*Alias)(e),
 	}
-	var err error
-	if err = json.Unmarshal(data, &aux); err != nil {
+	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	var merr *multierror.Error
+	var err error
 	if aux.ConnectTimeout != "" {
 		if e.ConnectTimeout, err = time.ParseDuration(aux.ConnectTimeout); err != nil {
-			merr = multierror.Append(merr, err)
+			return err
 		}
 	}
-	if aux.RequestTimeout != "" {
-		if e.RequestTimeout, err = time.ParseDuration(aux.RequestTimeout); err != nil {
-			merr = multierror.Append(merr, err)
-		}
-	}
-	return merr.ErrorOrNil()
+	return nil
 }
 
 func (e *ServiceResolverConfigEntry) GetKind() string            { return e.Kind }

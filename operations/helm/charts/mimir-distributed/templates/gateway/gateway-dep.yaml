@@ -39,10 +39,8 @@ spec:
       {{- end }}
       securityContext:
         {{- include "mimir.lib.podSecurityContext" (dict "ctx" $ "component" "gateway") | nindent 8 }}
-      {{- with .initContainers }}
       initContainers:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- toYaml .initContainers | nindent 8 }}
       {{- if $.Values.image.pullSecrets }}
       imagePullSecrets:
       {{- range $.Values.image.pullSecrets }}
@@ -90,8 +88,7 @@ spec:
             {{ toYaml .extraVolumeMounts | nindent 12 }}
             {{- end }}
             - name: nginx-config
-              mountPath: /etc/nginx/nginx.conf
-              subPath: nginx.conf
+              mountPath: /etc/nginx
             {{- if .nginx.basicAuth.enabled }}
             - name: auth
               mountPath: /etc/nginx/secrets
@@ -118,11 +115,6 @@ spec:
             {{- with .env }}
               {{ toYaml . | nindent 12 }}
             {{- end }}
-            {{- $jaeger_queue_size := dig "jaegerReporterMaxQueueSize" nil . }}
-            {{- if $jaeger_queue_size }}
-            - name: "JAEGER_REPORTER_MAX_QUEUE_SIZE"
-              value: {{$jaeger_queue_size | toString | toYaml }}
-            {{- end }}
           envFrom:
             {{- with $.Values.global.extraEnvFrom }}
               {{- toYaml . | nindent 12 }}
@@ -133,14 +125,10 @@ spec:
         {{- with .extraContainers }}
         {{ toYaml . | nindent 8 }}
         {{- end }}
-      {{- with .nodeSelector }}
       nodeSelector:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .affinity }}
+        {{- toYaml .nodeSelector | nindent 8 }}
       affinity:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- toYaml .affinity | nindent 8 }}
       {{- include "mimir.lib.topologySpreadConstraints" (dict "ctx" $ "component" "gateway") | nindent 6 }}
       {{- with .tolerations }}
       tolerations:

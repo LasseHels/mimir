@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -30,16 +29,15 @@ const (
 
 var (
 	// Discarded series / samples reasons.
-	reasonMissingMetricName            = globalerror.MissingMetricName.LabelValue()
-	reasonInvalidMetricName            = globalerror.InvalidMetricName.LabelValue()
-	reasonMaxLabelNamesPerSeries       = globalerror.MaxLabelNamesPerSeries.LabelValue()
-	reasonInvalidLabel                 = globalerror.SeriesInvalidLabel.LabelValue()
-	reasonLabelNameTooLong             = globalerror.SeriesLabelNameTooLong.LabelValue()
-	reasonLabelValueTooLong            = globalerror.SeriesLabelValueTooLong.LabelValue()
-	reasonMaxNativeHistogramBuckets    = globalerror.MaxNativeHistogramBuckets.LabelValue()
-	reasonInvalidNativeHistogramSchema = globalerror.InvalidSchemaNativeHistogram.LabelValue()
-	reasonDuplicateLabelNames          = globalerror.SeriesWithDuplicateLabelNames.LabelValue()
-	reasonTooFarInFuture               = globalerror.SampleTooFarInFuture.LabelValue()
+	reasonMissingMetricName         = globalerror.MissingMetricName.LabelValue()
+	reasonInvalidMetricName         = globalerror.InvalidMetricName.LabelValue()
+	reasonMaxLabelNamesPerSeries    = globalerror.MaxLabelNamesPerSeries.LabelValue()
+	reasonInvalidLabel              = globalerror.SeriesInvalidLabel.LabelValue()
+	reasonLabelNameTooLong          = globalerror.SeriesLabelNameTooLong.LabelValue()
+	reasonLabelValueTooLong         = globalerror.SeriesLabelValueTooLong.LabelValue()
+	reasonMaxNativeHistogramBuckets = globalerror.MaxNativeHistogramBuckets.LabelValue()
+	reasonDuplicateLabelNames       = globalerror.SeriesWithDuplicateLabelNames.LabelValue()
+	reasonTooFarInFuture            = globalerror.SampleTooFarInFuture.LabelValue()
 
 	// Discarded exemplars reasons.
 	reasonExemplarLabelsMissing    = globalerror.ExemplarLabelsMissing.LabelValue()
@@ -74,12 +72,17 @@ var (
 		"received a series whose number of labels exceeds the limit (actual: %d, limit: %d) series: '%.200s%s'",
 		validation.MaxLabelNamesPerSeriesFlag,
 	)
-	noMetricNameMsgFormat                 = globalerror.MissingMetricName.Message("received series has no metric name")
-	invalidMetricNameMsgFormat            = globalerror.InvalidMetricName.Message("received a series with invalid metric name: '%.200s'")
-	maxNativeHistogramBucketsMsgFormat    = globalerror.MaxNativeHistogramBuckets.Message("received a native histogram sample with too many buckets, timestamp: %d series: %s, buckets: %d, limit: %d")
-	notReducibleNativeHistogramMsgFormat  = globalerror.NotReducibleNativeHistogram.Message("received a native histogram sample with too many buckets and cannot reduce, timestamp: %d series: %s, buckets: %d, limit: %d")
-	invalidSchemaNativeHistogramMsgFormat = globalerror.InvalidSchemaNativeHistogram.Message("received a native histogram sample with an invalid schema: %d")
-	sampleTimestampTooNewMsgFormat        = globalerror.SampleTooFarInFuture.MessageWithPerTenantLimitConfig(
+	noMetricNameMsgFormat              = globalerror.MissingMetricName.Message("received series has no metric name")
+	invalidMetricNameMsgFormat         = globalerror.InvalidMetricName.Message("received a series with invalid metric name: '%.200s'")
+	maxNativeHistogramBucketsMsgFormat = fmt.Sprintf(
+		"received a native histogram sample with too many buckets, timestamp: %%d series: %%s, buckets: %%d, limit: %%d (%s)",
+		globalerror.MaxNativeHistogramBuckets,
+	)
+	notReducibleNativeHistogramMsgFormat = fmt.Sprintf(
+		"received a native histogram sample with too many buckets and cannot reduce, timestamp: %%d series: %%s, buckets: %%d, limit: %%d (%s)",
+		globalerror.NotReducibleNativeHistogram,
+	)
+	sampleTimestampTooNewMsgFormat = globalerror.SampleTooFarInFuture.MessageWithPerTenantLimitConfig(
 		"received a sample whose timestamp is too far in the future, timestamp: %d series: '%.200s'",
 		validation.CreationGracePeriodFlag,
 	)
@@ -113,16 +116,15 @@ type sampleValidationConfig interface {
 
 // sampleValidationMetrics is a collection of metrics used during sample validation.
 type sampleValidationMetrics struct {
-	missingMetricName            *prometheus.CounterVec
-	invalidMetricName            *prometheus.CounterVec
-	maxLabelNamesPerSeries       *prometheus.CounterVec
-	invalidLabel                 *prometheus.CounterVec
-	labelNameTooLong             *prometheus.CounterVec
-	labelValueTooLong            *prometheus.CounterVec
-	maxNativeHistogramBuckets    *prometheus.CounterVec
-	invalidNativeHistogramSchema *prometheus.CounterVec
-	duplicateLabelNames          *prometheus.CounterVec
-	tooFarInFuture               *prometheus.CounterVec
+	missingMetricName         *prometheus.CounterVec
+	invalidMetricName         *prometheus.CounterVec
+	maxLabelNamesPerSeries    *prometheus.CounterVec
+	invalidLabel              *prometheus.CounterVec
+	labelNameTooLong          *prometheus.CounterVec
+	labelValueTooLong         *prometheus.CounterVec
+	maxNativeHistogramBuckets *prometheus.CounterVec
+	duplicateLabelNames       *prometheus.CounterVec
+	tooFarInFuture            *prometheus.CounterVec
 }
 
 func (m *sampleValidationMetrics) deleteUserMetrics(userID string) {
@@ -134,7 +136,6 @@ func (m *sampleValidationMetrics) deleteUserMetrics(userID string) {
 	m.labelNameTooLong.DeletePartialMatch(filter)
 	m.labelValueTooLong.DeletePartialMatch(filter)
 	m.maxNativeHistogramBuckets.DeletePartialMatch(filter)
-	m.invalidNativeHistogramSchema.DeletePartialMatch(filter)
 	m.duplicateLabelNames.DeletePartialMatch(filter)
 	m.tooFarInFuture.DeletePartialMatch(filter)
 }
@@ -147,23 +148,21 @@ func (m *sampleValidationMetrics) deleteUserMetricsForGroup(userID, group string
 	m.labelNameTooLong.DeleteLabelValues(userID, group)
 	m.labelValueTooLong.DeleteLabelValues(userID, group)
 	m.maxNativeHistogramBuckets.DeleteLabelValues(userID, group)
-	m.invalidNativeHistogramSchema.DeleteLabelValues(userID, group)
 	m.duplicateLabelNames.DeleteLabelValues(userID, group)
 	m.tooFarInFuture.DeleteLabelValues(userID, group)
 }
 
 func newSampleValidationMetrics(r prometheus.Registerer) *sampleValidationMetrics {
 	return &sampleValidationMetrics{
-		missingMetricName:            validation.DiscardedSamplesCounter(r, reasonMissingMetricName),
-		invalidMetricName:            validation.DiscardedSamplesCounter(r, reasonInvalidMetricName),
-		maxLabelNamesPerSeries:       validation.DiscardedSamplesCounter(r, reasonMaxLabelNamesPerSeries),
-		invalidLabel:                 validation.DiscardedSamplesCounter(r, reasonInvalidLabel),
-		labelNameTooLong:             validation.DiscardedSamplesCounter(r, reasonLabelNameTooLong),
-		labelValueTooLong:            validation.DiscardedSamplesCounter(r, reasonLabelValueTooLong),
-		maxNativeHistogramBuckets:    validation.DiscardedSamplesCounter(r, reasonMaxNativeHistogramBuckets),
-		invalidNativeHistogramSchema: validation.DiscardedSamplesCounter(r, reasonInvalidNativeHistogramSchema),
-		duplicateLabelNames:          validation.DiscardedSamplesCounter(r, reasonDuplicateLabelNames),
-		tooFarInFuture:               validation.DiscardedSamplesCounter(r, reasonTooFarInFuture),
+		missingMetricName:         validation.DiscardedSamplesCounter(r, reasonMissingMetricName),
+		invalidMetricName:         validation.DiscardedSamplesCounter(r, reasonInvalidMetricName),
+		maxLabelNamesPerSeries:    validation.DiscardedSamplesCounter(r, reasonMaxLabelNamesPerSeries),
+		invalidLabel:              validation.DiscardedSamplesCounter(r, reasonInvalidLabel),
+		labelNameTooLong:          validation.DiscardedSamplesCounter(r, reasonLabelNameTooLong),
+		labelValueTooLong:         validation.DiscardedSamplesCounter(r, reasonLabelValueTooLong),
+		maxNativeHistogramBuckets: validation.DiscardedSamplesCounter(r, reasonMaxNativeHistogramBuckets),
+		duplicateLabelNames:       validation.DiscardedSamplesCounter(r, reasonDuplicateLabelNames),
+		tooFarInFuture:            validation.DiscardedSamplesCounter(r, reasonTooFarInFuture),
 	}
 }
 
@@ -220,11 +219,6 @@ func validateSampleHistogram(m *sampleValidationMetrics, now model.Time, cfg sam
 		return fmt.Errorf(sampleTimestampTooNewMsgFormat, s.Timestamp, unsafeMetricName)
 	}
 
-	if s.Schema < mimirpb.MinimumHistogramSchema || s.Schema > mimirpb.MaximumHistogramSchema {
-		m.invalidNativeHistogramSchema.WithLabelValues(userID, group).Inc()
-		return fmt.Errorf(invalidSchemaNativeHistogramMsgFormat, s.Schema)
-	}
-
 	if bucketLimit := cfg.MaxNativeHistogramBuckets(userID); bucketLimit > 0 {
 		var bucketCount int
 		if s.IsFloatHistogram() {
@@ -235,14 +229,13 @@ func validateSampleHistogram(m *sampleValidationMetrics, now model.Time, cfg sam
 		if bucketCount > bucketLimit {
 			if !cfg.ReduceNativeHistogramOverMaxBuckets(userID) {
 				m.maxNativeHistogramBuckets.WithLabelValues(userID, group).Inc()
-				return fmt.Errorf(maxNativeHistogramBucketsMsgFormat, s.Timestamp, mimirpb.FromLabelAdaptersToString(ls), bucketCount, bucketLimit)
+				return fmt.Errorf(maxNativeHistogramBucketsMsgFormat, s.Timestamp, mimirpb.FromLabelAdaptersToLabels(ls).String(), bucketCount, bucketLimit)
 			}
-
 			for {
 				bc, err := s.ReduceResolution()
 				if err != nil {
 					m.maxNativeHistogramBuckets.WithLabelValues(userID, group).Inc()
-					return fmt.Errorf(notReducibleNativeHistogramMsgFormat, s.Timestamp, mimirpb.FromLabelAdaptersToString(ls), bucketCount, bucketLimit)
+					return fmt.Errorf(notReducibleNativeHistogramMsgFormat, s.Timestamp, mimirpb.FromLabelAdaptersToLabels(ls).String(), bucketCount, bucketLimit)
 				}
 				if bc < bucketLimit {
 					break
@@ -259,12 +252,12 @@ func validateSampleHistogram(m *sampleValidationMetrics, now model.Time, cfg sam
 func validateExemplar(m *exemplarValidationMetrics, userID string, ls []mimirpb.LabelAdapter, e mimirpb.Exemplar) error {
 	if len(e.Labels) <= 0 {
 		m.labelsMissing.WithLabelValues(userID).Inc()
-		return fmt.Errorf(exemplarEmptyLabelsMsgFormat, e.TimestampMs, mimirpb.FromLabelAdaptersToString(ls), mimirpb.FromLabelAdaptersToString([]mimirpb.LabelAdapter{}))
+		return fmt.Errorf(exemplarEmptyLabelsMsgFormat, e.TimestampMs, mimirpb.FromLabelAdaptersToLabels(ls).String(), mimirpb.FromLabelAdaptersToLabels([]mimirpb.LabelAdapter{}).String())
 	}
 
 	if e.TimestampMs == 0 {
 		m.timestampInvalid.WithLabelValues(userID).Inc()
-		return fmt.Errorf(exemplarMissingTimestampMsgFormat, e.TimestampMs, mimirpb.FromLabelAdaptersToString(ls), mimirpb.FromLabelAdaptersToString(e.Labels))
+		return fmt.Errorf(exemplarMissingTimestampMsgFormat, e.TimestampMs, mimirpb.FromLabelAdaptersToLabels(ls).String(), mimirpb.FromLabelAdaptersToLabels(e.Labels).String())
 	}
 
 	// Exemplar label length does not include chars involved in text
@@ -286,12 +279,12 @@ func validateExemplar(m *exemplarValidationMetrics, userID string, ls []mimirpb.
 
 	if labelSetLen > ExemplarMaxLabelSetLength {
 		m.labelsTooLong.WithLabelValues(userID).Inc()
-		return fmt.Errorf(exemplarMaxLabelLengthMsgFormat, e.TimestampMs, mimirpb.FromLabelAdaptersToString(ls), mimirpb.FromLabelAdaptersToString(e.Labels))
+		return fmt.Errorf(exemplarMaxLabelLengthMsgFormat, e.TimestampMs, mimirpb.FromLabelAdaptersToLabels(ls).String(), mimirpb.FromLabelAdaptersToLabels(e.Labels).String())
 	}
 
 	if !foundValidLabel {
 		m.labelsBlank.WithLabelValues(userID).Inc()
-		return fmt.Errorf(exemplarEmptyLabelsMsgFormat, e.TimestampMs, mimirpb.FromLabelAdaptersToString(ls), mimirpb.FromLabelAdaptersToString(e.Labels))
+		return fmt.Errorf(exemplarEmptyLabelsMsgFormat, e.TimestampMs, mimirpb.FromLabelAdaptersToLabels(ls).String(), mimirpb.FromLabelAdaptersToLabels(e.Labels).String())
 	}
 
 	return nil
@@ -318,25 +311,6 @@ type labelValidationConfig interface {
 	MaxLabelValueLength(userID string) int
 }
 
-func removeNonASCIIChars(in string) (out string) {
-	foundNonASCII := false
-
-	out = strings.Map(func(r rune) rune {
-		if r <= unicode.MaxASCII {
-			return r
-		}
-
-		foundNonASCII = true
-		return -1
-	}, in)
-
-	if foundNonASCII {
-		out = out + " (non-ascii characters removed)"
-	}
-
-	return out
-}
-
 // validateLabels returns an err if the labels are invalid.
 // The returned error may retain the provided series labels.
 func validateLabels(m *sampleValidationMetrics, cfg labelValidationConfig, userID, group string, ls []mimirpb.LabelAdapter, skipLabelNameValidation bool) error {
@@ -348,7 +322,7 @@ func validateLabels(m *sampleValidationMetrics, cfg labelValidationConfig, userI
 
 	if !model.IsValidMetricName(model.LabelValue(unsafeMetricName)) {
 		m.invalidMetricName.WithLabelValues(userID, group).Inc()
-		return fmt.Errorf(invalidMetricNameMsgFormat, removeNonASCIIChars(unsafeMetricName))
+		return fmt.Errorf(invalidMetricNameMsgFormat, unsafeMetricName)
 	}
 
 	numLabelNames := len(ls)
@@ -364,16 +338,16 @@ func validateLabels(m *sampleValidationMetrics, cfg labelValidationConfig, userI
 	for _, l := range ls {
 		if !skipLabelNameValidation && !model.LabelName(l.Name).IsValid() {
 			m.invalidLabel.WithLabelValues(userID, group).Inc()
-			return fmt.Errorf(invalidLabelMsgFormat, l.Name, mimirpb.FromLabelAdaptersToString(ls))
+			return fmt.Errorf(invalidLabelMsgFormat, l.Name, formatLabelSet(ls))
 		} else if len(l.Name) > maxLabelNameLength {
 			m.labelNameTooLong.WithLabelValues(userID, group).Inc()
-			return fmt.Errorf(labelNameTooLongMsgFormat, l.Name, mimirpb.FromLabelAdaptersToString(ls))
+			return fmt.Errorf(labelNameTooLongMsgFormat, l.Name, formatLabelSet(ls))
 		} else if len(l.Value) > maxLabelValueLength {
 			m.labelValueTooLong.WithLabelValues(userID, group).Inc()
-			return fmt.Errorf(labelValueTooLongMsgFormat, l.Value, mimirpb.FromLabelAdaptersToString(ls))
+			return fmt.Errorf(labelValueTooLongMsgFormat, l.Value, formatLabelSet(ls))
 		} else if lastLabelName == l.Name {
 			m.duplicateLabelNames.WithLabelValues(userID, group).Inc()
-			return fmt.Errorf(duplicateLabelMsgFormat, l.Name, mimirpb.FromLabelAdaptersToString(ls))
+			return fmt.Errorf(duplicateLabelMsgFormat, l.Name, formatLabelSet(ls))
 		}
 
 		lastLabelName = l.Name
@@ -440,8 +414,34 @@ func cleanAndValidateMetadata(m *metadataValidationMetrics, cfg metadataValidati
 	return err
 }
 
+// formatLabelSet formats label adapters as a metric name with labels, while preserving
+// label order, and keeping duplicates. If there are multiple "__name__" labels, only
+// first one is used as metric name, other ones will be included as regular labels.
+func formatLabelSet(ls []mimirpb.LabelAdapter) string {
+	metricName, hasMetricName := "", false
+
+	labelStrings := make([]string, 0, len(ls))
+	for _, l := range ls {
+		if l.Name == model.MetricNameLabel && !hasMetricName && l.Value != "" {
+			metricName = l.Value
+			hasMetricName = true
+		} else {
+			labelStrings = append(labelStrings, fmt.Sprintf("%s=%q", l.Name, l.Value))
+		}
+	}
+
+	if len(labelStrings) == 0 {
+		if hasMetricName {
+			return metricName
+		}
+		return "{}"
+	}
+
+	return fmt.Sprintf("%s{%s}", metricName, strings.Join(labelStrings, ", "))
+}
+
 func getMetricAndEllipsis(ls []mimirpb.LabelAdapter) (string, string) {
-	metric := mimirpb.FromLabelAdaptersToString(ls)
+	metric := mimirpb.FromLabelAdaptersToMetric(ls).String()
 	ellipsis := ""
 
 	if utf8.RuneCountInString(metric) > 200 {

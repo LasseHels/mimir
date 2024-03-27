@@ -18,10 +18,6 @@ func main() {
 	fmt.Println(images.Consul)
 	fmt.Println(images.ETCD)
 	fmt.Println(images.Memcached)
-	fmt.Println(images.Kafka)
-
-	// vault image
-	fmt.Println(integration.VaultImage)
 
 	// images from previous releases
 	for image := range integration.DefaultPreviousVersionImages {

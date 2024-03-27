@@ -38,6 +38,5 @@
 // mTLS client configuration for Memcached
 (import 'memcached-client-mtls.libsonnet') +
 
-// Automated downscale of ingesters and store-gateways
-(import 'ingester-automated-downscale.libsonnet') +
+// Automated downscale of store-gateways
 (import 'store-gateway-automated-downscale.libsonnet')

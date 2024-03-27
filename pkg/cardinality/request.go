@@ -34,9 +34,8 @@ const (
 )
 
 type LabelNamesRequest struct {
-	Matchers    []*labels.Matcher
-	CountMethod CountMethod
-	Limit       int
+	Matchers []*labels.Matcher
+	Limit    int
 }
 
 // Strings returns a full representation of the request. The returned string can be
@@ -51,10 +50,6 @@ func (r *LabelNamesRequest) String() string {
 		}
 		b.WriteString(matcher.String())
 	}
-
-	// Add count method.
-	b.WriteRune(stringParamSeparator)
-	b.WriteString(string(r.CountMethod))
 
 	// Add limit.
 	b.WriteRune(stringParamSeparator)
@@ -86,11 +81,6 @@ func DecodeLabelNamesRequestFromValues(values url.Values) (*LabelNamesRequest, e
 	}
 
 	parsed.Limit, err = extractLimit(values)
-	if err != nil {
-		return nil, err
-	}
-
-	parsed.CountMethod, err = extractCountMethod(values)
 	if err != nil {
 		return nil, err
 	}

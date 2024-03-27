@@ -4,6 +4,7 @@ package queue
 
 import (
 	"container/list"
+	"errors"
 )
 
 type QueuePath []string //nolint:revive // disallows types beginning with package name
@@ -26,18 +27,20 @@ const localQueueIndex = -1
 type TreeQueue struct {
 	// name of the tree node will be set to its segment of the queue path
 	name                   string
+	maxQueueLen            int
 	localQueue             *list.List
 	currentChildQueueIndex int
 	childQueueOrder        []string
 	childQueueMap          map[string]*TreeQueue
 }
 
-func NewTreeQueue(name string) *TreeQueue {
+func NewTreeQueue(name string, maxQueueLen int) *TreeQueue {
 	return &TreeQueue{
 		name:                   name,
+		maxQueueLen:            maxQueueLen,
 		localQueue:             nil,
 		currentChildQueueIndex: localQueueIndex,
-		childQueueMap:          nil,
+		childQueueMap:          map[string]*TreeQueue{},
 		childQueueOrder:        nil,
 	}
 }
@@ -91,6 +94,9 @@ func (q *TreeQueue) EnqueueBackByPath(childPath QueuePath, v any) error {
 	if err != nil {
 		return err
 	}
+	if childQueue.LocalQueueLen()+1 > childQueue.maxQueueLen {
+		return ErrMaxQueueLengthExceeded
+	}
 
 	if childQueue.localQueue == nil {
 		childQueue.localQueue = list.New()
@@ -132,16 +138,13 @@ func (q *TreeQueue) getOrAddNode(childPath QueuePath) (*TreeQueue, error) {
 		return q, nil
 	}
 
-	if q.childQueueMap == nil {
-		q.childQueueMap = make(map[string]*TreeQueue, 1)
-	}
-
 	var childQueue *TreeQueue
 	var ok bool
+
 	if childQueue, ok = q.childQueueMap[childPath[0]]; !ok {
 		// no child node matches next path segment
 		// create next child before recurring
-		childQueue = NewTreeQueue(childPath[0])
+		childQueue = NewTreeQueue(childPath[0], q.maxQueueLen)
 
 		// add new child queue to ordered list for round-robining;
 		// in order to maintain round-robin order as nodes are created and deleted,
@@ -174,10 +177,6 @@ func (q *TreeQueue) getOrAddNode(childPath QueuePath) (*TreeQueue, error) {
 func (q *TreeQueue) getNode(childPath QueuePath) *TreeQueue {
 	if len(childPath) == 0 {
 		return q
-	}
-
-	if q.childQueueMap == nil {
-		return nil
 	}
 
 	if childQueue, ok := q.childQueueMap[childPath[0]]; ok {
@@ -290,3 +289,5 @@ func (q *TreeQueue) wrapIndex(increment bool) {
 		q.currentChildQueueIndex = localQueueIndex
 	}
 }
+
+var ErrMaxQueueLengthExceeded = errors.New("max queue length exceeded")

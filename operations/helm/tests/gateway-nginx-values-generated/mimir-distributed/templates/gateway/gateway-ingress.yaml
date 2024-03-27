@@ -13,10 +13,10 @@ metadata:
 spec:
   tls:
     - hosts:
-        - "gateway-nginx-values.mimir.example.com"
+        - "mimir.example.com"
       secretName: mimir-tls
   rules:
-    - host: "gateway-nginx-values.mimir.example.com"
+    - host: "mimir.example.com"
       http:
         paths:
           - path: /

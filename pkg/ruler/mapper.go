@@ -43,7 +43,7 @@ func (m *mapper) cleanupUser(userID string) {
 	dirPath := filepath.Join(m.Path, userID)
 	err := m.FS.RemoveAll(dirPath)
 	if err != nil {
-		level.Warn(m.logger).Log("msg", "unable to remove user directory", "path", dirPath, "user", userID, "err", err)
+		level.Warn(m.logger).Log("msg", "unable to remove user directory", "path", dirPath, "err", err)
 	}
 }
 
@@ -82,7 +82,8 @@ func (m *mapper) users() ([]string, error) {
 }
 
 func (m *mapper) MapRules(user string, ruleConfigs map[string][]rulefmt.RuleGroup) (bool, []string, error) {
-	logger := log.With(m.logger, "user", user)
+	anyUpdated := false
+	filenames := []string{}
 
 	// user rule files will be stored as `/<path>/<userid>/<encoded filename>`
 	path := filepath.Join(m.Path, user)
@@ -91,16 +92,13 @@ func (m *mapper) MapRules(user string, ruleConfigs map[string][]rulefmt.RuleGrou
 		return false, nil, err
 	}
 
-	anyUpdated := false
-	var filenames []string
-
 	// write all rule configs to disk
 	for filename, groups := range ruleConfigs {
 		// Store the encoded file name to better handle `/` characters
 		encodedFileName := url.PathEscape(filename)
 		fullFileName := filepath.Join(path, encodedFileName)
 
-		fileUpdated, err := m.writeRuleGroupsIfNewer(groups, fullFileName, logger)
+		fileUpdated, err := m.writeRuleGroupsIfNewer(groups, fullFileName)
 		if err != nil {
 			return false, nil, err
 		}
@@ -120,16 +118,16 @@ func (m *mapper) MapRules(user string, ruleConfigs map[string][]rulefmt.RuleGrou
 		// Ensure the namespace is decoded from a url path encoding to see if it is still required
 		decodedNamespace, err := url.PathUnescape(existingFile.Name())
 		if err != nil {
-			level.Warn(logger).Log("msg", "unable to remove rule file on disk", "file", fullFileName, "err", err)
+			level.Warn(m.logger).Log("msg", "unable to remove rule file on disk", "file", fullFileName, "err", err)
 			continue
 		}
 
-		ruleGroups := ruleConfigs[decodedNamespace]
+		ruleGroups := ruleConfigs[string(decodedNamespace)]
 
 		if ruleGroups == nil {
 			err = m.FS.Remove(fullFileName)
 			if err != nil {
-				level.Warn(logger).Log("msg", "unable to remove rule file on disk", "file", fullFileName, "err", err)
+				level.Warn(m.logger).Log("msg", "unable to remove rule file on disk", "file", fullFileName, "err", err)
 			}
 			anyUpdated = true
 		}
@@ -138,7 +136,7 @@ func (m *mapper) MapRules(user string, ruleConfigs map[string][]rulefmt.RuleGrou
 	return anyUpdated, filenames, nil
 }
 
-func (m *mapper) writeRuleGroupsIfNewer(groups []rulefmt.RuleGroup, filename string, logger log.Logger /* contextual logger with userID */) (bool, error) {
+func (m *mapper) writeRuleGroupsIfNewer(groups []rulefmt.RuleGroup, filename string) (bool, error) {
 	sort.Slice(groups, func(i, j int) bool {
 		return groups[i].Name > groups[j].Name
 	})
@@ -165,7 +163,7 @@ func (m *mapper) writeRuleGroupsIfNewer(groups []rulefmt.RuleGroup, filename str
 		}
 	}
 
-	level.Info(logger).Log("msg", "updating rule file", "file", filename)
+	level.Info(m.logger).Log("msg", "updating rule file", "file", filename)
 	err = afero.WriteFile(m.FS, filename, d, 0777)
 	if err != nil {
 		return false, err

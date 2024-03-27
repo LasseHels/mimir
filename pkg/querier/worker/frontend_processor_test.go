@@ -37,12 +37,12 @@ func TestFrontendProcessor_processQueriesOnSingleStream(t *testing.T) {
 
 			// No query to execute, so wait until terminated.
 			<-processClient.Context().Done()
-			return nil, toRPCErr(processClient.Context().Err())
+			return nil, processClient.Context().Err()
 		})
 
 		requestHandler.On("Handle", mock.Anything, mock.Anything).Return(&httpgrpc.HTTPResponse{}, nil)
 
-		fp.processQueriesOnSingleStream(workerCtx, nil, "127.0.0.1")
+		fp.processQueriesOnSingleStream(workerCtx, nil, "12.0.0.1")
 
 		// We expect at this point, the execution context has been canceled too.
 		require.Error(t, processClient.Context().Err())
@@ -66,7 +66,7 @@ func TestFrontendProcessor_processQueriesOnSingleStream(t *testing.T) {
 			default:
 				// No more messages to process, so waiting until terminated.
 				<-processClient.Context().Done()
-				return nil, toRPCErr(processClient.Context().Err())
+				return nil, processClient.Context().Err()
 			}
 		})
 
@@ -94,7 +94,6 @@ func TestFrontendProcessor_processQueriesOnSingleStream(t *testing.T) {
 		processClient.AssertNumberOfCalls(t, "Send", 1)
 	})
 }
-
 func TestFrontendProcessor_QueryTime(t *testing.T) {
 	runTest := func(t *testing.T, statsEnabled bool) {
 		fp, processClient, requestHandler := prepareFrontendProcessor()
@@ -114,7 +113,7 @@ func TestFrontendProcessor_QueryTime(t *testing.T) {
 			default:
 				// No more messages to process, so waiting until terminated.
 				<-processClient.Context().Done()
-				return nil, toRPCErr(processClient.Context().Err())
+				return nil, processClient.Context().Err()
 			}
 		})
 
@@ -189,7 +188,7 @@ func TestContextCancelStopsProcess(t *testing.T) {
 	require.NoError(t, err)
 
 	pm := newProcessorManager(ctx, &mockProcessor{}, cc, "test")
-	pm.concurrency(1, "starting")
+	pm.concurrency(1)
 
 	test.Poll(t, time.Second, 1, func() interface{} {
 		return int(pm.currentProcessors.Load())
@@ -201,7 +200,7 @@ func TestContextCancelStopsProcess(t *testing.T) {
 		return int(pm.currentProcessors.Load())
 	})
 
-	pm.stop("stopping")
+	pm.stop()
 	test.Poll(t, time.Second, 0, func() interface{} {
 		return int(pm.currentProcessors.Load())
 	})

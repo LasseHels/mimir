@@ -15,20 +15,20 @@ package chunks
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
-	"errors"
-	"fmt"
 	"hash"
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"sync"
 
 	"github.com/dennwc/varint"
+	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/atomic"
+	"golang.org/x/exp/slices"
 
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	tsdb_errors "github.com/prometheus/prometheus/tsdb/errors"
@@ -107,11 +107,7 @@ type CorruptionErr struct {
 }
 
 func (e *CorruptionErr) Error() string {
-	return fmt.Errorf("corruption in head chunk file %s: %w", segmentFile(e.Dir, e.FileIndex), e.Err).Error()
-}
-
-func (e *CorruptionErr) Unwrap() error {
-	return e.Err
+	return errors.Wrapf(e.Err, "corruption in head chunk file %s", segmentFile(e.Dir, e.FileIndex)).Error()
 }
 
 // chunkPos keeps track of the position in the head chunk files.
@@ -244,10 +240,10 @@ type mmappedChunkFile struct {
 func NewChunkDiskMapper(reg prometheus.Registerer, dir string, pool chunkenc.Pool, writeBufferSize, writeQueueSize int) (*ChunkDiskMapper, error) {
 	// Validate write buffer size.
 	if writeBufferSize < MinWriteBufferSize || writeBufferSize > MaxWriteBufferSize {
-		return nil, fmt.Errorf("ChunkDiskMapper write buffer size should be between %d and %d (actual: %d)", MinWriteBufferSize, MaxWriteBufferSize, writeBufferSize)
+		return nil, errors.Errorf("ChunkDiskMapper write buffer size should be between %d and %d (actual: %d)", MinWriteBufferSize, MaxWriteBufferSize, writeBufferSize)
 	}
 	if writeBufferSize%1024 != 0 {
-		return nil, fmt.Errorf("ChunkDiskMapper write buffer size should be a multiple of 1024 (actual: %d)", writeBufferSize)
+		return nil, errors.Errorf("ChunkDiskMapper write buffer size should be a multiple of 1024 (actual: %d)", writeBufferSize)
 	}
 
 	if err := os.MkdirAll(dir, 0o777); err != nil {
@@ -324,7 +320,7 @@ func (cdm *ChunkDiskMapper) openMMapFiles() (returnErr error) {
 	for seq, fn := range files {
 		f, err := fileutil.OpenMmapFile(fn)
 		if err != nil {
-			return fmt.Errorf("mmap files, file: %s: %w", fn, err)
+			return errors.Wrapf(err, "mmap files, file: %s", fn)
 		}
 		cdm.closers[seq] = f
 		cdm.mmappedChunkFiles[seq] = &mmappedChunkFile{byteSlice: realByteSlice(f.Bytes())}
@@ -339,23 +335,23 @@ func (cdm *ChunkDiskMapper) openMMapFiles() (returnErr error) {
 	lastSeq := chkFileIndices[0]
 	for _, seq := range chkFileIndices[1:] {
 		if seq != lastSeq+1 {
-			return fmt.Errorf("found unsequential head chunk files %s (index: %d) and %s (index: %d)", files[lastSeq], lastSeq, files[seq], seq)
+			return errors.Errorf("found unsequential head chunk files %s (index: %d) and %s (index: %d)", files[lastSeq], lastSeq, files[seq], seq)
 		}
 		lastSeq = seq
 	}
 
 	for i, b := range cdm.mmappedChunkFiles {
 		if b.byteSlice.Len() < HeadChunkFileHeaderSize {
-			return fmt.Errorf("%s: invalid head chunk file header: %w", files[i], errInvalidSize)
+			return errors.Wrapf(errInvalidSize, "%s: invalid head chunk file header", files[i])
 		}
 		// Verify magic number.
 		if m := binary.BigEndian.Uint32(b.byteSlice.Range(0, MagicChunksSize)); m != MagicHeadChunks {
-			return fmt.Errorf("%s: invalid magic number %x", files[i], m)
+			return errors.Errorf("%s: invalid magic number %x", files[i], m)
 		}
 
 		// Verify chunk format version.
 		if v := int(b.byteSlice.Range(MagicChunksSize, MagicChunksSize+ChunksFormatVersionSize)[0]); v != chunksFormatV1 {
-			return fmt.Errorf("%s: invalid chunk format version %d", files[i], v)
+			return errors.Errorf("%s: invalid chunk format version %d", files[i], v)
 		}
 	}
 
@@ -398,16 +394,16 @@ func repairLastChunkFile(files map[int]string) (_ map[int]string, returnErr erro
 
 	f, err := os.Open(files[lastFile])
 	if err != nil {
-		return files, fmt.Errorf("open file during last head chunk file repair: %w", err)
+		return files, errors.Wrap(err, "open file during last head chunk file repair")
 	}
 
 	buf := make([]byte, MagicChunksSize)
 	size, err := f.Read(buf)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return files, fmt.Errorf("failed to read magic number during last head chunk file repair: %w", err)
+	if err != nil && err != io.EOF {
+		return files, errors.Wrap(err, "failed to read magic number during last head chunk file repair")
 	}
 	if err := f.Close(); err != nil {
-		return files, fmt.Errorf("close file during last head chunk file repair: %w", err)
+		return files, errors.Wrap(err, "close file during last head chunk file repair")
 	}
 
 	// We either don't have enough bytes for the magic number or the magic number is 0.
@@ -417,7 +413,7 @@ func repairLastChunkFile(files map[int]string) (_ map[int]string, returnErr erro
 	if size < MagicChunksSize || binary.BigEndian.Uint32(buf) == 0 {
 		// Corrupt file, hence remove it.
 		if err := os.RemoveAll(files[lastFile]); err != nil {
-			return files, fmt.Errorf("delete corrupted, empty head chunk file during last file repair: %w", err)
+			return files, errors.Wrap(err, "delete corrupted, empty head chunk file during last file repair")
 		}
 		delete(files, lastFile)
 	}
@@ -564,7 +560,7 @@ func (cdm *ChunkDiskMapper) cutAndExpectRef(chkRef ChunkDiskMapperRef) (err erro
 	}
 
 	if expSeq, expOffset := chkRef.Unpack(); seq != expSeq || offset != expOffset {
-		return fmt.Errorf("expected newly cut file to have sequence:offset %d:%d, got %d:%d", expSeq, expOffset, seq, offset)
+		return errors.Errorf("expected newly cut file to have sequence:offset %d:%d, got %d:%d", expSeq, expOffset, seq, offset)
 	}
 
 	return nil
@@ -690,6 +686,7 @@ func (cdm *ChunkDiskMapper) Chunk(ref ChunkDiskMapperRef) (chunkenc.Chunk, error
 	sgmIndex, chkStart := ref.Unpack()
 	// We skip the series ref and the mint/maxt beforehand.
 	chkStart += SeriesRefSize + (2 * MintMaxtSize)
+	chkCRC32 := newCRC32()
 
 	// If it is the current open file, then the chunks can be in the buffer too.
 	if sgmIndex == cdm.curFileSequence {
@@ -705,13 +702,13 @@ func (cdm *ChunkDiskMapper) Chunk(ref ChunkDiskMapperRef) (chunkenc.Chunk, error
 			return nil, &CorruptionErr{
 				Dir:       cdm.dir.Name(),
 				FileIndex: -1,
-				Err:       fmt.Errorf("head chunk file index %d more than current open file", sgmIndex),
+				Err:       errors.Errorf("head chunk file index %d more than current open file", sgmIndex),
 			}
 		}
 		return nil, &CorruptionErr{
 			Dir:       cdm.dir.Name(),
 			FileIndex: sgmIndex,
-			Err:       fmt.Errorf("head chunk file index %d does not exist on disk", sgmIndex),
+			Err:       errors.Errorf("head chunk file index %d does not exist on disk", sgmIndex),
 		}
 	}
 
@@ -719,7 +716,7 @@ func (cdm *ChunkDiskMapper) Chunk(ref ChunkDiskMapperRef) (chunkenc.Chunk, error
 		return nil, &CorruptionErr{
 			Dir:       cdm.dir.Name(),
 			FileIndex: sgmIndex,
-			Err:       fmt.Errorf("head chunk file doesn't include enough bytes to read the chunk size data field - required:%v, available:%v", chkStart+MaxChunkLengthFieldSize, mmapFile.byteSlice.Len()),
+			Err:       errors.Errorf("head chunk file doesn't include enough bytes to read the chunk size data field - required:%v, available:%v", chkStart+MaxChunkLengthFieldSize, mmapFile.byteSlice.Len()),
 		}
 	}
 
@@ -738,7 +735,7 @@ func (cdm *ChunkDiskMapper) Chunk(ref ChunkDiskMapperRef) (chunkenc.Chunk, error
 		return nil, &CorruptionErr{
 			Dir:       cdm.dir.Name(),
 			FileIndex: sgmIndex,
-			Err:       fmt.Errorf("reading chunk length failed with %d", n),
+			Err:       errors.Errorf("reading chunk length failed with %d", n),
 		}
 	}
 
@@ -748,17 +745,24 @@ func (cdm *ChunkDiskMapper) Chunk(ref ChunkDiskMapperRef) (chunkenc.Chunk, error
 		return nil, &CorruptionErr{
 			Dir:       cdm.dir.Name(),
 			FileIndex: sgmIndex,
-			Err:       fmt.Errorf("head chunk file doesn't include enough bytes to read the chunk - required:%v, available:%v", chkDataEnd, mmapFile.byteSlice.Len()),
+			Err:       errors.Errorf("head chunk file doesn't include enough bytes to read the chunk - required:%v, available:%v", chkDataEnd, mmapFile.byteSlice.Len()),
 		}
 	}
 
 	// Check the CRC.
 	sum := mmapFile.byteSlice.Range(chkDataEnd, chkDataEnd+CRCSize)
-	if err := checkCRC32(mmapFile.byteSlice.Range(chkStart-(SeriesRefSize+2*MintMaxtSize), chkDataEnd), sum); err != nil {
+	if _, err := chkCRC32.Write(mmapFile.byteSlice.Range(chkStart-(SeriesRefSize+2*MintMaxtSize), chkDataEnd)); err != nil {
 		return nil, &CorruptionErr{
 			Dir:       cdm.dir.Name(),
 			FileIndex: sgmIndex,
 			Err:       err,
+		}
+	}
+	if act := chkCRC32.Sum(nil); !bytes.Equal(act, sum) {
+		return nil, &CorruptionErr{
+			Dir:       cdm.dir.Name(),
+			FileIndex: sgmIndex,
+			Err:       errors.Errorf("checksum mismatch expected:%x, actual:%x", sum, act),
 		}
 	}
 
@@ -794,6 +798,8 @@ func (cdm *ChunkDiskMapper) IterateAllChunks(f func(seriesRef HeadSeriesRef, chu
 		cdm.fileMaxtSet = true
 	}()
 
+	chkCRC32 := newCRC32()
+
 	// Iterate files in ascending order.
 	segIDs := make([]int, 0, len(cdm.mmappedChunkFiles))
 	for seg := range cdm.mmappedChunkFiles {
@@ -824,10 +830,11 @@ func (cdm *ChunkDiskMapper) IterateAllChunks(f func(seriesRef HeadSeriesRef, chu
 				return &CorruptionErr{
 					Dir:       cdm.dir.Name(),
 					FileIndex: segID,
-					Err: fmt.Errorf("head chunk file has some unread data, but doesn't include enough bytes to read the chunk header"+
+					Err: errors.Errorf("head chunk file has some unread data, but doesn't include enough bytes to read the chunk header"+
 						" - required:%v, available:%v, file:%d", idx+MaxHeadChunkMetaSize, fileEnd, segID),
 				}
 			}
+			chkCRC32.Reset()
 			chunkRef := newChunkDiskMapperRef(uint64(segID), uint64(idx))
 
 			startIdx := idx
@@ -860,17 +867,20 @@ func (cdm *ChunkDiskMapper) IterateAllChunks(f func(seriesRef HeadSeriesRef, chu
 				return &CorruptionErr{
 					Dir:       cdm.dir.Name(),
 					FileIndex: segID,
-					Err:       fmt.Errorf("head chunk file doesn't include enough bytes to read the chunk header - required:%v, available:%v, file:%d", idx+CRCSize, fileEnd, segID),
+					Err:       errors.Errorf("head chunk file doesn't include enough bytes to read the chunk header - required:%v, available:%v, file:%d", idx+CRCSize, fileEnd, segID),
 				}
 			}
 
 			// Check CRC.
 			sum := mmapFile.byteSlice.Range(idx, idx+CRCSize)
-			if err := checkCRC32(mmapFile.byteSlice.Range(startIdx, idx), sum); err != nil {
+			if _, err := chkCRC32.Write(mmapFile.byteSlice.Range(startIdx, idx)); err != nil {
+				return err
+			}
+			if act := chkCRC32.Sum(nil); !bytes.Equal(act, sum) {
 				return &CorruptionErr{
 					Dir:       cdm.dir.Name(),
 					FileIndex: segID,
-					Err:       err,
+					Err:       errors.Errorf("checksum mismatch expected:%x, actual:%x", sum, act),
 				}
 			}
 			idx += CRCSize
@@ -882,8 +892,7 @@ func (cdm *ChunkDiskMapper) IterateAllChunks(f func(seriesRef HeadSeriesRef, chu
 			// Extract the encoding from the byte. ChunkDiskMapper uses only the last 7 bits for the encoding.
 			chkEnc = cdm.RemoveMasks(chkEnc)
 			if err := f(seriesRef, chunkRef, mint, maxt, numSamples, chkEnc, isOOO); err != nil {
-				var cerr *CorruptionErr
-				if errors.As(err, &cerr) {
+				if cerr, ok := err.(*CorruptionErr); ok {
 					cerr.Dir = cdm.dir.Name()
 					cerr.FileIndex = segID
 					return cerr
@@ -897,7 +906,7 @@ func (cdm *ChunkDiskMapper) IterateAllChunks(f func(seriesRef HeadSeriesRef, chu
 			return &CorruptionErr{
 				Dir:       cdm.dir.Name(),
 				FileIndex: segID,
-				Err:       fmt.Errorf("head chunk file doesn't include enough bytes to read the last chunk data - required:%v, available:%v, file:%d", idx, fileEnd, segID),
+				Err:       errors.Errorf("head chunk file doesn't include enough bytes to read the last chunk data - required:%v, available:%v, file:%d", idx, fileEnd, segID),
 			}
 		}
 	}
@@ -990,9 +999,10 @@ func (cdm *ChunkDiskMapper) deleteFiles(removedFiles []int) ([]int, error) {
 // DeleteCorrupted deletes all the head chunk files after the one which had the corruption
 // (including the corrupt file).
 func (cdm *ChunkDiskMapper) DeleteCorrupted(originalErr error) error {
-	var cerr *CorruptionErr
-	if !errors.As(originalErr, &cerr) {
-		return fmt.Errorf("cannot handle error: %w", originalErr)
+	err := errors.Cause(originalErr) // So that we can pick up errors even if wrapped.
+	cerr, ok := err.(*CorruptionErr)
+	if !ok {
+		return errors.Wrap(originalErr, "cannot handle error")
 	}
 
 	// Delete all the head chunk files following the corrupt head chunk file.

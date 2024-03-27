@@ -16,7 +16,7 @@
 
 package version
 
-func GetRevision() string {
+func getRevision() string {
 	return Revision
 }
 

@@ -11,13 +11,14 @@ import (
 	"github.com/grafana/dskit/httpgrpc"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	"github.com/grafana/mimir/pkg/api"
 )
 
 func TestGrpcInflightMethodLimiter(t *testing.T) {
 	t.Run("nil ingester and distributor receiver", func(t *testing.T) {
-		l := newGrpcInflightMethodLimiter(func() pushReceiver { return nil }, func() pushReceiver { return nil })
+		l := newGrpcInflightMethodLimiter(func() ingesterPushReceiver { return nil }, func() distributorPushReceiver { return nil })
 
 		ctx, err := l.RPCCallStarting(context.Background(), "test", nil)
 		require.NoError(t, err)
@@ -44,7 +45,7 @@ func TestGrpcInflightMethodLimiter(t *testing.T) {
 
 	t.Run("ingester push receiver, wrong method name", func(t *testing.T) {
 		m := &mockIngesterReceiver{}
-		l := newGrpcInflightMethodLimiter(func() pushReceiver { return m }, nil)
+		l := newGrpcInflightMethodLimiter(func() ingesterPushReceiver { return m }, nil)
 
 		ctx, err := l.RPCCallStarting(context.Background(), "test", nil)
 		require.NoError(t, err)
@@ -57,19 +58,19 @@ func TestGrpcInflightMethodLimiter(t *testing.T) {
 
 	t.Run("ingester push receiver, check returns error", func(t *testing.T) {
 		m := &mockIngesterReceiver{}
-		l := newGrpcInflightMethodLimiter(func() pushReceiver { return m }, nil)
+		l := newGrpcInflightMethodLimiter(func() ingesterPushReceiver { return m }, nil)
 
 		m.returnError = errors.New("hello there")
 		ctx, err := l.RPCCallStarting(context.Background(), ingesterPushMethod, nil)
 		require.Error(t, err)
-		_, ok := grpcutil.ErrorToStatus(err)
+		_, ok := status.FromError(err)
 		require.True(t, ok)
 		require.Nil(t, ctx.Value(pushTypeCtxKey)) // Original context expected in case of errors.
 	})
 
 	t.Run("ingester push receiver, without size", func(t *testing.T) {
 		m := &mockIngesterReceiver{}
-		l := newGrpcInflightMethodLimiter(func() pushReceiver { return m }, nil)
+		l := newGrpcInflightMethodLimiter(func() ingesterPushReceiver { return m }, nil)
 
 		ctx, err := l.RPCCallStarting(context.Background(), ingesterPushMethod, nil)
 		require.NoError(t, err)
@@ -89,7 +90,7 @@ func TestGrpcInflightMethodLimiter(t *testing.T) {
 
 	t.Run("ingester push receiver, with size provided", func(t *testing.T) {
 		m := &mockIngesterReceiver{}
-		l := newGrpcInflightMethodLimiter(func() pushReceiver { return m }, nil)
+		l := newGrpcInflightMethodLimiter(func() ingesterPushReceiver { return m }, nil)
 
 		ctx, err := l.RPCCallStarting(context.Background(), ingesterPushMethod, metadata.New(map[string]string{
 			grpcutil.MetadataMessageSize: "123456",
@@ -111,7 +112,7 @@ func TestGrpcInflightMethodLimiter(t *testing.T) {
 
 	t.Run("ingester push receiver, with wrong size", func(t *testing.T) {
 		m := &mockIngesterReceiver{}
-		l := newGrpcInflightMethodLimiter(func() pushReceiver { return m }, nil)
+		l := newGrpcInflightMethodLimiter(func() ingesterPushReceiver { return m }, nil)
 
 		ctx, err := l.RPCCallStarting(context.Background(), ingesterPushMethod, metadata.New(map[string]string{
 			grpcutil.MetadataMessageSize: "wrong",
@@ -134,7 +135,7 @@ func TestGrpcInflightMethodLimiter(t *testing.T) {
 	t.Run("distributor push via httpgrpc", func(t *testing.T) {
 		m := &mockDistributorReceiver{}
 
-		l := newGrpcInflightMethodLimiter(nil, func() pushReceiver { return m })
+		l := newGrpcInflightMethodLimiter(nil, func() distributorPushReceiver { return m })
 
 		ctx, err := l.RPCCallStarting(context.Background(), "test", nil)
 		require.NoError(t, err)
@@ -169,7 +170,7 @@ func TestGrpcInflightMethodLimiter(t *testing.T) {
 			grpcutil.MetadataMessageSize: "123456",
 		}))
 		require.Error(t, err)
-		_, ok := grpcutil.ErrorToStatus(err)
+		_, ok := status.FromError(err)
 		require.True(t, ok)
 		require.Nil(t, ctx.Value(pushTypeCtxKey)) // Original context expected in case of errors.
 	})
@@ -177,7 +178,7 @@ func TestGrpcInflightMethodLimiter(t *testing.T) {
 	t.Run("distributor push via httpgrpc, GET", func(t *testing.T) {
 		m := &mockDistributorReceiver{}
 
-		l := newGrpcInflightMethodLimiter(nil, func() pushReceiver { return m })
+		l := newGrpcInflightMethodLimiter(nil, func() distributorPushReceiver { return m })
 
 		_, err := l.RPCCallStarting(context.Background(), httpgrpcHandleMethod, metadata.New(map[string]string{
 			httpgrpc.MetadataMethod:      "GET",
@@ -192,7 +193,7 @@ func TestGrpcInflightMethodLimiter(t *testing.T) {
 
 	t.Run("distributor push via httpgrpc, /hello", func(t *testing.T) {
 		m := &mockDistributorReceiver{}
-		l := newGrpcInflightMethodLimiter(nil, func() pushReceiver { return m })
+		l := newGrpcInflightMethodLimiter(nil, func() distributorPushReceiver { return m })
 
 		_, err := l.RPCCallStarting(context.Background(), httpgrpcHandleMethod, metadata.New(map[string]string{
 			httpgrpc.MetadataMethod:      "POST",
@@ -207,7 +208,7 @@ func TestGrpcInflightMethodLimiter(t *testing.T) {
 
 	t.Run("distributor push via httpgrpc, wrong message size", func(t *testing.T) {
 		m := &mockDistributorReceiver{}
-		l := newGrpcInflightMethodLimiter(nil, func() pushReceiver { return m })
+		l := newGrpcInflightMethodLimiter(nil, func() distributorPushReceiver { return m })
 
 		_, err := l.RPCCallStarting(context.Background(), httpgrpcHandleMethod, metadata.New(map[string]string{
 			httpgrpc.MetadataMethod:      "POST",
@@ -222,8 +223,6 @@ func TestGrpcInflightMethodLimiter(t *testing.T) {
 }
 
 type mockIngesterReceiver struct {
-	lastRequestSize int64
-
 	startCalls  int
 	startBytes  int64
 	finishCalls int
@@ -231,16 +230,15 @@ type mockIngesterReceiver struct {
 	returnError error
 }
 
-func (i *mockIngesterReceiver) StartPushRequest(ctx context.Context, size int64) (context.Context, error) {
-	i.lastRequestSize = size
+func (i *mockIngesterReceiver) StartPushRequest(size int64) error {
 	i.startCalls++
 	i.startBytes += size
-	return ctx, i.returnError
+	return i.returnError
 }
 
-func (i *mockIngesterReceiver) FinishPushRequest(_ context.Context) {
+func (i *mockIngesterReceiver) FinishPushRequest(size int64) {
 	i.finishCalls++
-	i.finishBytes += i.lastRequestSize
+	i.finishBytes += size
 }
 
 type mockDistributorReceiver struct {

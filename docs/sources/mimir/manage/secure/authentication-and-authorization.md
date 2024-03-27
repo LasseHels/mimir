@@ -51,9 +51,7 @@ headers:
 
 In trusted environments where you want to split series on Prometheus labels, you can run [cortex-tenant](https://github.com/blind-oracle/cortex-tenant) between a Prometheus server and Grafana Mimir.
 
-{{< admonition type="note" >}}
-cortex-tenant is a third-party community project that's not maintained by Grafana Labs.
-{{< /admonition >}}
+> **Note:** cortex-tenant is a third-party community project that is not maintained by Grafana Labs.
 
 When proxying the timeseries to Grafana Mimir, you can configure cortex-tenant to use specified labels as the `X-Scope-OrgID` header.
 
@@ -69,7 +67,4 @@ After you disable multi-tenancy, Grafana Mimir components internally set the ten
 
 To set an alternative tenant ID, use the `-auth.no-auth-tenant` flag.
 
-{{< admonition type="note" >}}
-Not all tenant IDs are valid.
-For more information about tenant ID restrictions, refer to [About tenant IDs]({{< relref "../../configure/about-tenant-ids" >}}).
-{{< /admonition >}}
+> **Note**: Not all tenant IDs are valid. For more information about tenant ID restrictions, refer to [About tenant IDs]({{< relref "../../configure/about-tenant-ids" >}}).

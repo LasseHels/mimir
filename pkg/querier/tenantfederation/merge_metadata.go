@@ -25,12 +25,14 @@ func NewMetadataSupplier(next querier.MetadataSupplier, maxConcurrency int, logg
 	return &mergeMetadataSupplier{
 		next:           next,
 		maxConcurrency: maxConcurrency,
+		resolver:       tenant.NewMultiResolver(),
 		logger:         logger,
 	}
 }
 
 type mergeMetadataSupplier struct {
 	next           querier.MetadataSupplier
+	resolver       tenant.Resolver
 	maxConcurrency int
 	logger         log.Logger
 }
@@ -39,7 +41,7 @@ func (m *mergeMetadataSupplier) MetricsMetadata(ctx context.Context, req *client
 	spanlog, ctx := spanlogger.NewWithLogger(ctx, m.logger, "mergeMetadataSupplier.MetricsMetadata")
 	defer spanlog.Finish()
 
-	tenantIDs, err := tenant.TenantIDs(ctx)
+	tenantIDs, err := m.resolver.TenantIDs(ctx)
 	if err != nil {
 		return nil, err
 	}

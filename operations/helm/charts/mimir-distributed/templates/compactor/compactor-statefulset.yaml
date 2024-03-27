@@ -9,11 +9,6 @@ metadata:
   namespace: {{ .Release.Namespace | quote }}
 spec:
   podManagementPolicy: {{ .Values.compactor.podManagementPolicy }}
-  {{- if and (semverCompare ">= 1.23-0" (include "mimir.kubeVersion" .)) (.Values.compactor.persistentVolume.enableRetentionPolicy)  }}
-  persistentVolumeClaimRetentionPolicy:
-    whenDeleted: {{ .Values.compactor.persistentVolume.whenDeleted }}
-    whenScaled: {{ .Values.compactor.persistentVolume.whenScaled }}
-  {{- end }}
   replicas: {{ .Values.compactor.replicas }}
   selector:
     matchLabels:
@@ -60,29 +55,21 @@ spec:
       {{- end }}
       securityContext:
         {{- include "mimir.lib.podSecurityContext" (dict "ctx" . "component" "compactor") | nindent 8 }}
-      {{- with .Values.compactor.initContainers }}
       initContainers:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- toYaml .Values.compactor.initContainers | nindent 8 }}
       {{- if .Values.image.pullSecrets }}
       imagePullSecrets:
       {{- range .Values.image.pullSecrets }}
         - name: {{ . }}
       {{- end }}
       {{- end }}
-      {{- with .Values.compactor.nodeSelector }}
       nodeSelector:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.compactor.affinity }}
+        {{- toYaml .Values.compactor.nodeSelector | nindent 8 }}
       affinity:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- toYaml .Values.compactor.affinity | nindent 8 }}
       {{- include "mimir.lib.topologySpreadConstraints" (dict "ctx" . "component" "compactor") | nindent 6 }}
-      {{- with .Values.compactor.tolerations }}
       tolerations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- toYaml .Values.compactor.tolerations | nindent 8 }}
       terminationGracePeriodSeconds: {{ .Values.compactor.terminationGracePeriodSeconds }}
       volumes:
         - name: config
@@ -161,11 +148,6 @@ spec:
             {{- end }}
             {{- with .Values.compactor.env }}
               {{- toYaml . | nindent 12 }}
-            {{- end }}
-            {{- $jaeger_queue_size := dig "jaegerReporterMaxQueueSize" nil .Values.compactor }}
-            {{- if $jaeger_queue_size }}
-            - name: "JAEGER_REPORTER_MAX_QUEUE_SIZE"
-              value: {{$jaeger_queue_size | toString | toYaml }}
             {{- end }}
           envFrom:
             {{- with .Values.global.extraEnvFrom }}

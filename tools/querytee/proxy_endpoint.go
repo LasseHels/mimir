@@ -23,11 +23,10 @@ type ResponsesComparator interface {
 }
 
 type ProxyEndpoint struct {
-	backends              []ProxyBackendInterface
-	metrics               *ProxyMetrics
-	logger                log.Logger
-	comparator            ResponsesComparator
-	slowResponseThreshold time.Duration
+	backends   []*ProxyBackend
+	metrics    *ProxyMetrics
+	logger     log.Logger
+	comparator ResponsesComparator
 
 	// Whether for this endpoint there's a preferred backend configured.
 	hasPreferredBackend bool
@@ -36,23 +35,22 @@ type ProxyEndpoint struct {
 	routeName string
 }
 
-func NewProxyEndpoint(backends []ProxyBackendInterface, routeName string, metrics *ProxyMetrics, logger log.Logger, comparator ResponsesComparator, slowResponseThreshold time.Duration) *ProxyEndpoint {
+func NewProxyEndpoint(backends []*ProxyBackend, routeName string, metrics *ProxyMetrics, logger log.Logger, comparator ResponsesComparator) *ProxyEndpoint {
 	hasPreferredBackend := false
 	for _, backend := range backends {
-		if backend.Preferred() {
+		if backend.preferred {
 			hasPreferredBackend = true
 			break
 		}
 	}
 
 	return &ProxyEndpoint{
-		backends:              backends,
-		routeName:             routeName,
-		metrics:               metrics,
-		logger:                logger,
-		comparator:            comparator,
-		slowResponseThreshold: slowResponseThreshold,
-		hasPreferredBackend:   hasPreferredBackend,
+		backends:            backends,
+		routeName:           routeName,
+		metrics:             metrics,
+		logger:              logger,
+		comparator:          comparator,
+		hasPreferredBackend: hasPreferredBackend,
 	}
 }
 
@@ -74,7 +72,7 @@ func (p *ProxyEndpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	p.metrics.responsesTotal.WithLabelValues(downstreamRes.backend.Name(), r.Method, p.routeName).Inc()
+	p.metrics.responsesTotal.WithLabelValues(downstreamRes.backend.name, r.Method, p.routeName).Inc()
 }
 
 func (p *ProxyEndpoint) executeBackendRequests(req *http.Request, resCh chan *backendResponse) {
@@ -84,7 +82,6 @@ func (p *ProxyEndpoint) executeBackendRequests(req *http.Request, resCh chan *ba
 		body         []byte
 		responses    = make([]*backendResponse, 0, len(p.backends))
 		responsesMtx = sync.Mutex{}
-		timingMtx    = sync.Mutex{}
 		query        = req.URL.RawQuery
 	)
 
@@ -107,40 +104,23 @@ func (p *ProxyEndpoint) executeBackendRequests(req *http.Request, resCh chan *ba
 
 	level.Debug(p.logger).Log("msg", "Received request", "path", req.URL.Path, "query", query)
 
-	// Keep track of the fastest and slowest backends
-	var (
-		fastestDuration time.Duration
-		fastestBackend  ProxyBackendInterface
-		slowestDuration time.Duration
-		slowestBackend  ProxyBackendInterface
-	)
-
 	wg.Add(len(p.backends))
 	for _, b := range p.backends {
 		b := b
 
 		go func() {
 			defer wg.Done()
-			var bodyReader io.ReadCloser
+			var (
+				bodyReader io.ReadCloser
+				start      = time.Now()
+			)
 			if len(body) > 0 {
 				bodyReader = io.NopCloser(bytes.NewReader(body))
 			}
 
-			elapsed, status, body, resp, err := b.ForwardRequest(req, bodyReader)
+			status, body, resp, err := b.ForwardRequest(req, bodyReader)
+			elapsed := time.Since(start)
 			contentType := ""
-
-			if p.slowResponseThreshold > 0 {
-				timingMtx.Lock()
-				if elapsed > slowestDuration {
-					slowestDuration = elapsed
-					slowestBackend = b
-				}
-				if fastestDuration == 0 || elapsed < fastestDuration {
-					fastestDuration = elapsed
-					fastestBackend = b
-				}
-				timingMtx.Unlock()
-			}
 
 			if resp != nil {
 				contentType = resp.Header.Get("Content-Type")
@@ -152,7 +132,6 @@ func (p *ProxyEndpoint) executeBackendRequests(req *http.Request, resCh chan *ba
 				contentType: contentType,
 				body:        body,
 				err:         err,
-				elapsedTime: elapsed,
 			}
 
 			// Log with a level based on the backend response.
@@ -161,8 +140,8 @@ func (p *ProxyEndpoint) executeBackendRequests(req *http.Request, resCh chan *ba
 				lvl = level.Warn
 			}
 
-			lvl(p.logger).Log("msg", "Backend response", "path", req.URL.Path, "query", query, "backend", b.Name(), "status", status, "elapsed", elapsed)
-			p.metrics.requestDuration.WithLabelValues(res.backend.Name(), req.Method, p.routeName, strconv.Itoa(res.statusCode())).Observe(elapsed.Seconds())
+			lvl(p.logger).Log("msg", "Backend response", "path", req.URL.Path, "query", query, "backend", b.name, "status", status, "elapsed", elapsed)
+			p.metrics.requestDuration.WithLabelValues(res.backend.name, req.Method, p.routeName, strconv.Itoa(res.statusCode())).Observe(elapsed.Seconds())
 
 			// Keep track of the response if required.
 			if p.comparator != nil {
@@ -183,7 +162,7 @@ func (p *ProxyEndpoint) executeBackendRequests(req *http.Request, resCh chan *ba
 	if p.comparator != nil {
 		expectedResponse := responses[0]
 		actualResponse := responses[1]
-		if responses[1].backend.Preferred() {
+		if responses[1].backend.preferred {
 			expectedResponse, actualResponse = actualResponse, expectedResponse
 		}
 
@@ -191,36 +170,18 @@ func (p *ProxyEndpoint) executeBackendRequests(req *http.Request, resCh chan *ba
 		if result == ComparisonFailed {
 			level.Error(p.logger).Log(
 				"msg", "response comparison failed",
-				"route_name", p.routeName,
+				"route-name", p.routeName,
 				"query", query,
 				"user", req.Header.Get("X-Scope-OrgID"),
 				"err", err,
-				"expected_response_duration", expectedResponse.elapsedTime,
-				"actual_response_duration", actualResponse.elapsedTime,
 			)
 		} else if result == ComparisonSkipped {
 			level.Warn(p.logger).Log(
 				"msg", "response comparison skipped",
-				"route_name", p.routeName,
+				"route-name", p.routeName,
 				"query", query,
 				"user", req.Header.Get("X-Scope-OrgID"),
 				"err", err,
-				"expected_response_duration", expectedResponse.elapsedTime,
-				"actual_response_duration", actualResponse.elapsedTime,
-			)
-		}
-
-		// Log queries that are slower in some backends than others
-		if p.slowResponseThreshold > 0 && slowestDuration-fastestDuration >= p.slowResponseThreshold {
-			level.Warn(p.logger).Log(
-				"msg", "response time difference between backends exceeded threshold",
-				"route_name", p.routeName,
-				"query", query,
-				"user", req.Header.Get("X-Scope-OrgID"),
-				"slowest_duration", slowestDuration,
-				"slowest_backend", slowestBackend.Name(),
-				"fastest_duration", fastestDuration,
-				"fastest_backend", fastestBackend.Name(),
 			)
 		}
 
@@ -239,13 +200,13 @@ func (p *ProxyEndpoint) waitBackendResponseForDownstream(resCh chan *backendResp
 		// - There's no preferred backend configured
 		// - Or this response is from the preferred backend
 		// - Or the preferred backend response has already been received and wasn't successful
-		if res.succeeded() && (!p.hasPreferredBackend || res.backend.Preferred() || preferredResponseReceived) {
+		if res.succeeded() && (!p.hasPreferredBackend || res.backend.preferred || preferredResponseReceived) {
 			return res
 		}
 
 		// If we received a non-successful response from the preferred backend, then we can
 		// return the first successful response received so far (if any).
-		if res.backend.Preferred() && !res.succeeded() {
+		if res.backend.preferred && !res.succeeded() {
 			preferredResponseReceived = true
 
 			for _, prevRes := range responses {
@@ -288,12 +249,11 @@ func (p *ProxyEndpoint) compareResponses(expectedResponse, actualResponse *backe
 }
 
 type backendResponse struct {
-	backend     ProxyBackendInterface
+	backend     *ProxyBackend
 	status      int
 	contentType string
 	body        []byte
 	err         error
-	elapsedTime time.Duration
 }
 
 func (r *backendResponse) succeeded() bool {

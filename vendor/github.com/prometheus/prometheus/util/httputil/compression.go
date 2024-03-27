@@ -14,12 +14,11 @@
 package httputil
 
 import (
+	"compress/gzip"
+	"compress/zlib"
 	"io"
 	"net/http"
 	"strings"
-
-	"github.com/klauspost/compress/gzip"
-	"github.com/klauspost/compress/zlib"
 )
 
 const (

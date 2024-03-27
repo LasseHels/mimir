@@ -4,7 +4,6 @@ local filename = 'mimir-overview-resources.json';
 (import 'dashboard-utils.libsonnet') +
 (import 'dashboard-queries.libsonnet') {
   [filename]:
-    assert std.md5(filename) == 'a9b92d3c4d1af325d872a9e9a7083d71' : 'UID of the dashboard has changed, please update references to dashboard.';
     ($.dashboard('Overview resources') + { uid: std.md5(filename) })
     .addClusterSelectorTemplates(false)
 
@@ -25,13 +24,13 @@ local filename = 'mimir-overview-resources.json';
     .addRow(
       $.row('Writes')
       .addPanel(
-        $.timeseriesPanel('CPU') +
+        $.panel('CPU') +
         $.queryPanel($.resourceUtilizationQuery('cpu', $._config.instance_names.write, $._config.container_names.write), '{{%s}}' % $._config.per_instance_label),
       )
       .addPanel(
-        $.timeseriesPanel('Memory (workingset)') +
+        $.panel('Memory (workingset)') +
         $.queryPanel($.resourceUtilizationQuery('memory_working', $._config.instance_names.write, $._config.container_names.write), '{{%s}}' % $._config.per_instance_label) +
-        { fieldConfig+: { defaults+: { unit: 'bytes' } } },
+        { yaxes: $.yaxes('bytes') },
       )
       .addPanel(
         $.containerGoHeapInUsePanelByComponent('write'),
@@ -53,13 +52,13 @@ local filename = 'mimir-overview-resources.json';
     .addRow(
       $.row('Reads')
       .addPanel(
-        $.timeseriesPanel('CPU') +
+        $.panel('CPU') +
         $.queryPanel($.resourceUtilizationQuery('cpu', $._config.instance_names.read, $._config.container_names.read), '{{%s}}' % $._config.per_instance_label),
       )
       .addPanel(
-        $.timeseriesPanel('Memory (workingset)') +
+        $.panel('Memory (workingset)') +
         $.queryPanel($.resourceUtilizationQuery('memory_working', $._config.instance_names.read, $._config.container_names.read), '{{%s}}' % $._config.per_instance_label) +
-        { fieldConfig+: { defaults+: { unit: 'bytes' } } },
+        { yaxes: $.yaxes('bytes') },
       )
       .addPanel(
         $.containerGoHeapInUsePanelByComponent('read'),
@@ -69,13 +68,13 @@ local filename = 'mimir-overview-resources.json';
     .addRow(
       $.row('Backend')
       .addPanel(
-        $.timeseriesPanel('CPU') +
+        $.panel('CPU') +
         $.queryPanel($.resourceUtilizationQuery('cpu', $._config.instance_names.backend, $._config.container_names.backend), '{{%s}}' % $._config.per_instance_label),
       )
       .addPanel(
-        $.timeseriesPanel('Memory (workingset)') +
+        $.panel('Memory (workingset)') +
         $.queryPanel($.resourceUtilizationQuery('memory_working', $._config.instance_names.backend, $._config.container_names.backend), '{{%s}}' % $._config.per_instance_label) +
-        { fieldConfig+: { defaults+: { unit: 'bytes' } } },
+        { yaxes: $.yaxes('bytes') },
       )
       .addPanel(
         $.containerGoHeapInUsePanelByComponent('backend'),

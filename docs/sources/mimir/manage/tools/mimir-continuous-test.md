@@ -49,9 +49,7 @@ Mimir-continuous-test requires the endpoints of the backend Grafana Mimir cluste
   - `-tests.tenant-id` to the tenant ID, default to `anonymous`.
 - Set `-tests.smoke-test` to run the test once and immediately exit. In this mode, the process exit code is non-zero when the test fails.
 
-{{< admonition type="note" >}}
-You can run `mimir-continuous-test -help` to list all available configuration options.
-{{< /admonition >}}
+> **Note:** You can run `mimir-continuous-test -help` to list all available configuration options.
 
 ## How it works
 

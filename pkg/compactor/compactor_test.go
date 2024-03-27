@@ -47,7 +47,6 @@ import (
 	"github.com/grafana/mimir/pkg/storage/bucket/filesystem"
 	mimir_tsdb "github.com/grafana/mimir/pkg/storage/tsdb"
 	"github.com/grafana/mimir/pkg/storage/tsdb/block"
-	testutil "github.com/grafana/mimir/pkg/util/test"
 	"github.com/grafana/mimir/pkg/util/validation"
 )
 
@@ -132,12 +131,11 @@ func TestConfig_Validate(t *testing.T) {
 
 	for testName, testData := range tests {
 		t.Run(testName, func(t *testing.T) {
-			logger := testutil.NewTestingLogger(t)
 			cfg := &Config{}
 			flagext.DefaultValues(cfg)
 			testData.setup(cfg)
 
-			if actualErr := cfg.Validate(logger); testData.expected != "" {
+			if actualErr := cfg.Validate(); testData.expected != "" {
 				assert.EqualError(t, actualErr, testData.expected)
 			} else {
 				assert.NoError(t, actualErr)
@@ -1273,11 +1271,11 @@ func TestMultitenantCompactor_ShouldFailWithInvalidTSDBCompactOutput(t *testing.
 
 	storageDir := t.TempDir()
 
-	meta1, err := block.GenerateBlockFromSpec(filepath.Join(storageDir, user), sourceBlock1Spec)
+	meta1, err := block.GenerateBlockFromSpec(user, filepath.Join(storageDir, user), sourceBlock1Spec)
 	require.NoError(t, err)
-	meta2, err := block.GenerateBlockFromSpec(filepath.Join(storageDir, user), sourceBlock2Spec)
+	meta2, err := block.GenerateBlockFromSpec(user, filepath.Join(storageDir, user), sourceBlock2Spec)
 	require.NoError(t, err)
-	_, err = block.GenerateBlockFromSpec(filepath.Join(storageDir, user), sourceBlock3Spec)
+	_, err = block.GenerateBlockFromSpec(user, filepath.Join(storageDir, user), sourceBlock3Spec)
 	require.NoError(t, err)
 
 	bkt, err := filesystem.NewBucketClient(filesystem.Config{Directory: storageDir})
@@ -1293,7 +1291,7 @@ func TestMultitenantCompactor_ShouldFailWithInvalidTSDBCompactOutput(t *testing.
 	mockCall.RunFn = func(args mock.Arguments) {
 		dir := args.Get(0).(string)
 
-		compactedMeta, err := block.GenerateBlockFromSpec(dir, compactedBlockSpec)
+		compactedMeta, err := block.GenerateBlockFromSpec(user, dir, compactedBlockSpec)
 		require.NoError(t, err)
 		f, err := os.OpenFile(filepath.Join(dir, compactedMeta.ULID.String(), "tombstones"), os.O_RDONLY|os.O_CREATE, 0666)
 		require.NoError(t, err)
@@ -1462,13 +1460,13 @@ func TestMultitenantCompactor_ShouldSkipCompactionForJobsWithFirstLevelCompactio
 		}))},
 	}}
 
-	user1Meta1, err := block.GenerateBlockFromSpec(filepath.Join(storageDir, "user-1"), spec)
+	user1Meta1, err := block.GenerateBlockFromSpec("user-1", filepath.Join(storageDir, "user-1"), spec)
 	require.NoError(t, err)
-	user1Meta2, err := block.GenerateBlockFromSpec(filepath.Join(storageDir, "user-1"), spec)
+	user1Meta2, err := block.GenerateBlockFromSpec("user-1", filepath.Join(storageDir, "user-1"), spec)
 	require.NoError(t, err)
-	user2Meta1, err := block.GenerateBlockFromSpec(filepath.Join(storageDir, "user-2"), spec)
+	user2Meta1, err := block.GenerateBlockFromSpec("user-2", filepath.Join(storageDir, "user-2"), spec)
 	require.NoError(t, err)
-	user2Meta2, err := block.GenerateBlockFromSpec(filepath.Join(storageDir, "user-2"), spec)
+	user2Meta2, err := block.GenerateBlockFromSpec("user-2", filepath.Join(storageDir, "user-2"), spec)
 	require.NoError(t, err)
 
 	// Mock the last modified timestamp returned for each of the block's meta.json.
@@ -1665,7 +1663,7 @@ func findCompactorByUserID(compactors []*MultitenantCompactor, logs []*concurren
 	var log *concurrency.SyncBuffer
 
 	for i, c := range compactors {
-		owned, err := c.shardingStrategy.compactorOwnsUser(userID)
+		owned, err := c.shardingStrategy.compactorOwnUser(userID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -2161,9 +2159,9 @@ func owningCompactors(t *testing.T, comps []*MultitenantCompactor, user string, 
 	for _, c := range comps {
 		var f func(string) (bool, error)
 		if reason == ownUserReasonCompactor {
-			f = c.shardingStrategy.compactorOwnsUser
+			f = c.shardingStrategy.compactorOwnUser
 		} else {
-			f = c.shardingStrategy.blocksCleanerOwnsUser
+			f = c.shardingStrategy.blocksCleanerOwnUser
 		}
 		ok, err := f(user)
 		require.NoError(t, err)
@@ -2183,118 +2181,15 @@ func stopServiceFn(t *testing.T, serv services.Service) func() {
 }
 
 func TestMultitenantCompactor_OutOfOrderCompaction(t *testing.T) {
-	const user = "user"
-
-	var (
-		ctx        = context.Background()
-		storageDir = t.TempDir()
-		fixtureDir = filepath.Join("fixtures", "test-ooo-compaction")
-	)
-
-	// Utility function originally used to generate a block with out of order chunks
-	// used by this test. The block has been generated commenting out the checks done
-	// by TSDB block Writer to prevent OOO chunks writing.
-	_ = func() {
-		specs := []*block.SeriesSpec{
-			{
-				Labels: labels.FromStrings("case", "out_of_order"),
-				Chunks: []chunks.Meta{
-					must(chunks.ChunkFromSamples([]chunks.Sample{newSample(20, 20, nil, nil), newSample(21, 21, nil, nil)})),
-					must(chunks.ChunkFromSamples([]chunks.Sample{newSample(10, 10, nil, nil), newSample(11, 11, nil, nil)})),
-					// Extend block to cover 2h.
-					must(chunks.ChunkFromSamples([]chunks.Sample{newSample(0, 0, nil, nil), newSample(2*time.Hour.Milliseconds()-1, 0, nil, nil)})),
-				},
-			},
-		}
-
-		_, err := block.GenerateBlockFromSpec(fixtureDir, specs)
-		require.NoError(t, err)
-
-		_, err = block.GenerateBlockFromSpec(fixtureDir, specs)
-		require.NoError(t, err)
-	}
-
-	bkt, err := filesystem.NewBucketClient(filesystem.Config{Directory: storageDir})
-	require.NoError(t, err)
-	userBkt := bucket.NewUserBucketClient(user, bkt, nil)
-
-	// Copy blocks from fixtures dir to the test bucket.
-	var metas []*block.Meta
-
-	entries, err := os.ReadDir(fixtureDir)
-	require.NoError(t, err)
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		blockDir := filepath.Join(fixtureDir, entry.Name())
-
-		blockID, err := ulid.Parse(entry.Name())
-		require.NoErrorf(t, err, "parsing block ID from directory name %q", entry.Name())
-
-		meta, err := block.ReadMetaFromDir(blockDir)
-		require.NoErrorf(t, err, "reading meta from block at &s", blockDir)
-
-		require.NoError(t, block.Upload(ctx, log.NewNopLogger(), userBkt, filepath.Join(fixtureDir, blockID.String()), meta))
-
-		metas = append(metas, meta)
-	}
-
-	// We expect 2 blocks have been copied.
-	require.Len(t, metas, 2)
-
-	cfg := prepareConfig(t)
-	c, _, tsdbPlanner, logs, registry := prepare(t, cfg, bkt)
-
-	tsdbPlanner.On("Plan", mock.Anything, mock.Anything).Return(metas, nil)
-
-	// Start the compactor
-	require.NoError(t, services.StartAndAwaitRunning(ctx, c))
-
-	// Wait until a compaction run has been completed.
-	test.Poll(t, 10*time.Second, 1.0, func() interface{} {
-		return prom_testutil.ToFloat64(c.compactionRunsCompleted)
-	})
-
-	// Stop the compactor.
-	require.NoError(t, services.StopAndAwaitTerminated(ctx, c))
-
-	// Verify that compactor has found block with out of order chunks, and this block is now marked for no-compaction.
-	r := regexp.MustCompile("level=info component=compactor user=user msg=\"block has been marked for no compaction\" block=([0-9A-Z]+)")
-	matches := r.FindStringSubmatch(logs.String())
-	require.Len(t, matches, 2) // Entire string match + single group match.
-
-	skippedBlock := matches[1]
-	require.True(t, skippedBlock == metas[0].ULID.String() || skippedBlock == metas[1].ULID.String())
-
-	m := &block.NoCompactMark{}
-	require.NoError(t, block.ReadMarker(ctx, log.NewNopLogger(), objstore.WithNoopInstr(bkt), path.Join(user, skippedBlock), m))
-	require.Equal(t, skippedBlock, m.ID.String())
-	require.NotZero(t, m.NoCompactTime)
-	require.Equal(t, block.NoCompactReason(block.OutOfOrderChunksNoCompactReason), m.Reason)
-
-	assert.NoError(t, prom_testutil.GatherAndCompare(registry, strings.NewReader(`
-		# HELP cortex_compactor_blocks_marked_for_no_compaction_total Total number of blocks that were marked for no-compaction.
-		# TYPE cortex_compactor_blocks_marked_for_no_compaction_total counter
-		cortex_compactor_blocks_marked_for_no_compaction_total{reason="block-index-out-of-order-chunk"} 1
-		cortex_compactor_blocks_marked_for_no_compaction_total{reason="critical"} 0
-	`),
-		"cortex_compactor_blocks_marked_for_no_compaction_total",
-	))
-}
-
-func TestMultitenantCompactor_CriticalIssue(t *testing.T) {
-	// Generate a single block with a single chunk.
+	// Generate a single block with out of order chunks.
 	specs := []*block.SeriesSpec{
 		{
-			Labels: labels.FromStrings("case", "critical"),
+			Labels: labels.FromStrings("case", "out_of_order"),
 			Chunks: []chunks.Meta{
-				must(chunks.ChunkFromSamples([]chunks.Sample{
-					newSample(0, 0, nil, nil),
-					newSample(2*time.Hour.Milliseconds()-1, 1, nil, nil),
-				})),
+				must(chunks.ChunkFromSamples([]chunks.Sample{newSample(20, 20, nil, nil), newSample(21, 21, nil, nil)})),
+				must(chunks.ChunkFromSamples([]chunks.Sample{newSample(10, 10, nil, nil), newSample(11, 11, nil, nil)})),
+				// Extend block to cover 2h.
+				must(chunks.ChunkFromSamples([]chunks.Sample{newSample(0, 0, nil, nil), newSample(2*time.Hour.Milliseconds()-1, 0, nil, nil)})),
 			},
 		},
 	}
@@ -2303,14 +2198,10 @@ func TestMultitenantCompactor_CriticalIssue(t *testing.T) {
 
 	storageDir := t.TempDir()
 	// We need two blocks to start compaction.
-	meta1, err := block.GenerateBlockFromSpec(filepath.Join(storageDir, user), specs)
+	meta1, err := block.GenerateBlockFromSpec(user, filepath.Join(storageDir, user), specs)
 	require.NoError(t, err)
-	meta2, err := block.GenerateBlockFromSpec(filepath.Join(storageDir, user), specs)
+	meta2, err := block.GenerateBlockFromSpec(user, filepath.Join(storageDir, user), specs)
 	require.NoError(t, err)
-
-	// Force chunk to fall out of the block time range by modifying MaxTime.
-	meta1.MaxTime -= 1000
-	meta2.MaxTime -= 1000
 
 	bkt, err := filesystem.NewBucketClient(filesystem.Config{Directory: storageDir})
 	require.NoError(t, err)
@@ -2331,7 +2222,7 @@ func TestMultitenantCompactor_CriticalIssue(t *testing.T) {
 	// Stop the compactor.
 	require.NoError(t, services.StopAndAwaitTerminated(context.Background(), c))
 
-	// Verify that compactor has found the unhealthy block, and this block is now marked for no-compaction.
+	// Verify that compactor has found block with out of order chunks, and this block is now marked for no-compaction.
 	r := regexp.MustCompile("level=info component=compactor user=user msg=\"block has been marked for no compaction\" block=([0-9A-Z]+)")
 	matches := r.FindStringSubmatch(logs.String())
 	require.Len(t, matches, 2) // Entire string match + single group match.
@@ -2343,13 +2234,12 @@ func TestMultitenantCompactor_CriticalIssue(t *testing.T) {
 	require.NoError(t, block.ReadMarker(context.Background(), log.NewNopLogger(), objstore.WithNoopInstr(bkt), path.Join(user, skippedBlock), m))
 	require.Equal(t, skippedBlock, m.ID.String())
 	require.NotZero(t, m.NoCompactTime)
-	require.Equal(t, block.NoCompactReason(block.CriticalNoCompactReason), m.Reason)
+	require.Equal(t, block.NoCompactReason(block.OutOfOrderChunksNoCompactReason), m.Reason)
 
 	assert.NoError(t, prom_testutil.GatherAndCompare(registry, strings.NewReader(`
 		# HELP cortex_compactor_blocks_marked_for_no_compaction_total Total number of blocks that were marked for no-compaction.
 		# TYPE cortex_compactor_blocks_marked_for_no_compaction_total counter
-		cortex_compactor_blocks_marked_for_no_compaction_total{reason="block-index-out-of-order-chunk"} 0
-		cortex_compactor_blocks_marked_for_no_compaction_total{reason="critical"} 1
+		cortex_compactor_blocks_marked_for_no_compaction_total{reason="block-index-out-of-order-chunk"} 1
 	`),
 		"cortex_compactor_blocks_marked_for_no_compaction_total",
 	))

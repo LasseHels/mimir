@@ -156,9 +156,8 @@ func (d protobufDecoder) decodeVector(v *mimirpb.VectorData) (promql.Vector, err
 
 		samples[floatSampleCount+i] = promql.Sample{
 			Metric: m,
-			// We must not use the address of the loop variable as that's reused.
-			H: (&(v.Histograms[i].Histogram)).ToPrometheusModel(),
-			T: s.TimestampMs,
+			H:      s.Histogram.ToPrometheusModel(),
+			T:      s.TimestampMs,
 		}
 	}
 

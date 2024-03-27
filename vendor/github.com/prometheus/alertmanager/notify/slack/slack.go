@@ -25,6 +25,7 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/pkg/errors"
 	commoncfg "github.com/prometheus/common/config"
 
 	"github.com/prometheus/alertmanager/config"
@@ -215,7 +216,7 @@ func (n *Notifier) Notify(ctx context.Context, as ...*types.Alert) (bool, error)
 	// classify them as retriable or not.
 	retry, err := n.retrier.Check(resp.StatusCode, resp.Body)
 	if err != nil {
-		err = fmt.Errorf("channel %q: %w", req.Channel, err)
+		err = errors.Wrap(err, fmt.Sprintf("channel %q", req.Channel))
 		return retry, notify.NewErrorWithReason(notify.GetFailureReasonFromStatusCode(resp.StatusCode), err)
 	}
 
@@ -223,7 +224,7 @@ func (n *Notifier) Notify(ctx context.Context, as ...*types.Alert) (bool, error)
 	// https://slack.dev/node-slack-sdk/web-api#handle-errors
 	retry, err = checkResponseError(resp)
 	if err != nil {
-		err = fmt.Errorf("channel %q: %w", req.Channel, err)
+		err = errors.Wrap(err, fmt.Sprintf("channel %q", req.Channel))
 		return retry, notify.NewErrorWithReason(notify.ClientErrorReason, err)
 	}
 
@@ -234,7 +235,7 @@ func (n *Notifier) Notify(ctx context.Context, as ...*types.Alert) (bool, error)
 func checkResponseError(resp *http.Response) (bool, error) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return true, fmt.Errorf("could not read response body: %w", err)
+		return true, errors.Wrap(err, "could not read response body")
 	}
 
 	if strings.HasPrefix(resp.Header.Get("Content-Type"), "application/json") {
@@ -264,7 +265,7 @@ func checkJSONResponseError(body []byte) (bool, error) {
 
 	var data response
 	if err := json.Unmarshal(body, &data); err != nil {
-		return true, fmt.Errorf("could not unmarshal JSON response %q: %w", string(body), err)
+		return true, errors.Wrapf(err, "could not unmarshal JSON response %q", string(body))
 	}
 	if !data.OK {
 		return false, fmt.Errorf("error response from Slack: %s", data.Error)

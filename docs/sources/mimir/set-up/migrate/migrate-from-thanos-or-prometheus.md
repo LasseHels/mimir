@@ -46,9 +46,8 @@ Use Grafana mimirtool to upload each block, such as those identified by the prev
 mimirtool backfill --address=http://<mimir-hostname> --id=<tenant> <block1> <block2>...
 ```
 
-{{< admonition type="note" >}}
-If you need to authenticate against Grafana Mimir, you can provide an API key via the `--key` flag, for example `--key=$(cat token.txt)`.
-{{< /admonition >}}
+> **Note**: If you need to authenticate against Grafana Mimir, you can provide an API key via the `--key` flag,
+> for example `--key=$(cat token.txt)`.
 
 Grafana Mimir performs some sanitization and validation of each block's metadata.
 As a result, it rejects Thanos blocks due to unsupported labels.
@@ -64,10 +63,7 @@ In the Grafana Mimir 2.1 (or earlier) release, the ingesters added an external l
 
 In the Grafana Mimir 2.2 (or later) release, blocks no longer have a label that identifies the tenant.
 
-{{< admonition type="note" >}}
-Blocks from Prometheus don't have any external labels stored in them.
-Only blocks from Thanos use labels.
-{{< /admonition >}}
+> **Note**: Blocks from Prometheus do not have any external labels stored in them; only blocks from Thanos use labels.
 
 ## Considerations on Thanos specific features
 
@@ -97,9 +93,7 @@ This may cause that incorrect results are returned for the query.
 
    Create an intermediate object storage bucket (such as Amazon S3 or GCS) within your cloud provider, where you can copy the historical blocks and work on them before uploading them to the Mimir bucket.
 
-   {{< admonition type="tip" >}}
-   Run the commands within a `screen` or `tmux` session, to avoid any interruptions because the steps might take some time depending on the amount of data.
-   {{< /admonition >}}
+   > **Tip:** Run the commands within a `screen` or `tmux` session, to avoid any interruptions because the steps might take time depending on the amount of data being processed.
 
    For Amazon S3, use the `aws` tool:
 
@@ -167,9 +161,7 @@ This may cause that incorrect results are returned for the query.
    done
    ```
 
-   {{< admonition type="note" >}}
-   You must replace `prometheus_replica` with the unique label that would differentiate Prometheus replicas in your setup.
-   {{< /admonition >}}
+   > **Note:** Replace `prometheus_replica` with the unique label that would differentiate Prometheus replicas in your setup.
 
    Clean up the duplicate blocks marked for deletion again:
 
@@ -179,24 +171,19 @@ This may cause that incorrect results are returned for the query.
        --delete-delay=0
    ```
 
-   {{< admonition type="tip" >}}
-   If you want to visualize exactly what's happening in the blocks, with respect to the source of blocks, external labels, compaction levels, and more, you can use the following command to get the output as CSV and import it into a spreadsheet:
-
-   ```bash
-   thanos tools bucket inspect \
-       --objstore.config-file bucket-prod.yaml \
-       --output=csv > thanos-blocks.csv
-   ```
-
-   {{< /admonition >}}
+   > **Tip:** If you want to visualize exactly what is happening in the blocks, with respect to the source of blocks, external labels, compaction levels, and more, you can use the following command to get the output as CSV and import it into a Google spreadsheet:
+   >
+   > ```bash
+   > thanos tools bucket inspect \
+   >     --objstore.config-file bucket-prod.yaml \
+   >     --output=csv > thanos-blocks.csv
+   > ```
 
 1. Relabel the blocks with external labels.
 
    Mimir doesn’t inject external labels from the `meta.json` file into query results. Therefore, you need to relabel the blocks with the required external labels in the `meta.json` file.
 
-   {{< admonition type="tip" >}}
-   You can get the external labels in the `meta.json` file of each block from the CSV file that's imported, and build the rewrite configuration accordingly.
-   {{< /admonition >}}
+   > **Note:** You can get the external labels in the `meta.json` file of each block from the CSV file that is imported (as mentioned in the preceding tip), and build the rewrite configuration accordingly.
 
    Create a rewrite configuration that is similar to this:
 
@@ -274,32 +261,28 @@ This may cause that incorrect results are returned for the query.
        --delete-delay=0
    ```
 
-   {{< admonition type="note" >}}
-   If there are multiple Prometheus clusters, then relabelling each of them in parallel may speed up the entire process.
+   > **Note**: If there are multiple prometheus clusters, then relabelling each of them in parallel may speed up the entire process.
+   > Get the list of blocks that for each cluster, and process it separately.
+   >
+   > ```bash
+   > thanos tools bucket inspect \
+   >     --objstore.config-file bucket.yaml \
+   >     --output=tsv \
+   >     | grep <PROMETHEUS-CLUSTER-NAME> \
+   >     | awk '{print $1}' > prod-blocks.tsv
+   > ```
 
-   Get the list of blocks that for each cluster, and process it separately.
-
-   ```bash
-   thanos tools bucket inspect \
-       --objstore.config-file bucket.yaml \
-       --output=tsv \
-       | grep <PROMETHEUS-CLUSTER-NAME> \
-       | awk '{print $1}' > prod-blocks.tsv
-   ```
-
-   ```bash
-   for ID in `cat prod-blocks.tsv`
-   do
-       thanos tools bucket rewrite  \
-          --objstore.config-file bucket.yaml \
-          --rewrite.to-relabel-config-file relabel-config.yaml \
-          --delete-blocks \
-          --no-dry-run \
-          --id $ID
-   done
-   ```
-
-   {{< /admonition >}}
+   > ```bash
+   > for ID in `cat prod-blocks.tsv`
+   > do
+   >     thanos tools bucket rewrite  \
+   >        --objstore.config-file bucket.yaml \
+   >        --rewrite.to-relabel-config-file relabel-config.yaml \
+   >        --delete-blocks \
+   >        --no-dry-run \
+   >        --id $ID
+   > done
+   > ```
 
 1. Remove external labels from meta.json.
 

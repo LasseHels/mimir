@@ -12,6 +12,7 @@
 // limitations under the License.
 
 //go:build !windows && !plan9 && !js
+// +build !windows,!plan9,!js
 
 package fileutil
 

@@ -15,7 +15,6 @@ package sns
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -70,8 +69,7 @@ func (n *Notifier) Notify(ctx context.Context, alert ...*types.Alert) (bool, err
 
 	client, err := n.createSNSClient(tmpl)
 	if err != nil {
-		var e awserr.RequestFailure
-		if errors.As(err, &e) {
+		if e, ok := err.(awserr.RequestFailure); ok {
 			return n.retrier.Check(e.StatusCode(), strings.NewReader(e.Message()))
 		}
 		return true, err
@@ -84,8 +82,7 @@ func (n *Notifier) Notify(ctx context.Context, alert ...*types.Alert) (bool, err
 
 	publishOutput, err := client.Publish(publishInput)
 	if err != nil {
-		var e awserr.RequestFailure
-		if errors.As(err, &e) {
+		if e, ok := err.(awserr.RequestFailure); ok {
 			retryable, error := n.retrier.Check(e.StatusCode(), strings.NewReader(e.Message()))
 
 			reasonErr := notify.NewErrorWithReason(notify.GetFailureReasonFromStatusCode(e.StatusCode()), error)

@@ -57,14 +57,7 @@ func (cfg *CombinedFrontendConfig) Validate() error {
 // Returned RoundTripper can be wrapped in more round-tripper middlewares, and then eventually registered
 // into HTTP server using the Handler from this package. Returned RoundTripper is always non-nil
 // (if there are no errors), and it uses the returned frontend (if any).
-func InitFrontend(
-	cfg CombinedFrontendConfig,
-	v1Limits v1.Limits,
-	v2Limits v2.Limits,
-	grpcListenPort int,
-	log log.Logger,
-	reg prometheus.Registerer,
-) (http.RoundTripper, *v1.Frontend, *v2.Frontend, error) {
+func InitFrontend(cfg CombinedFrontendConfig, limits v1.Limits, grpcListenPort int, log log.Logger, reg prometheus.Registerer) (http.RoundTripper, *v1.Frontend, *v2.Frontend, error) {
 	switch {
 	case cfg.DownstreamURL != "":
 		// If the user has specified a downstream Prometheus, then we should use that.
@@ -86,12 +79,12 @@ func InitFrontend(
 			cfg.FrontendV2.Port = grpcListenPort
 		}
 
-		fr, err := v2.NewFrontend(cfg.FrontendV2, v2Limits, log, reg)
+		fr, err := v2.NewFrontend(cfg.FrontendV2, log, reg)
 		return transport.AdaptGrpcRoundTripperToHTTPRoundTripper(fr), nil, fr, err
 
 	default:
 		// No scheduler = use original frontend.
-		fr, err := v1.New(cfg.FrontendV1, v1Limits, log, reg)
+		fr, err := v1.New(cfg.FrontendV1, limits, log, reg)
 		if err != nil {
 			return nil, nil, nil, err
 		}
