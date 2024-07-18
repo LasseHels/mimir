@@ -3361,6 +3361,11 @@ func (i *Ingester) unsetPrepareShutdown() {
 	i.metrics.shutdownMarker.Set(0)
 }
 
+func (i *Ingester) PrepareUnregisterHandler(_ http.ResponseWriter, _ *http.Request) {
+	level.Info(i.logger).Log("msg", "prepare unregister called on 2.12")
+	i.lifecycler.SetUnregisterOnShutdown(true)
+}
+
 // PreparePartitionDownscaleHandler prepares the ingester's partition downscaling. The partition owned by the
 // ingester will switch to INACTIVE state (read-only).
 //
